@@ -1,0 +1,140 @@
+// Auto-tests: tool registry + read_file + grep.
+// Zero deps. Uses a real temp directory (node:fs) — NO model is involved.
+
+import { test, before, after } from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import {
+  createDefaultRegistry,
+  ToolRegistry,
+  readFileTool,
+  grepTool,
+  type ToolContext,
+} from "../src/tools/tools.ts";
+
+let tmp = "";
+let ctx: ToolContext;
+
+before(async () => {
+  tmp = await fs.mkdtemp(path.join(os.tmpdir(), "qh-m2-"));
+  ctx = { cwd: tmp };
+  await fs.writeFile(path.join(tmp, "a.txt"), "alpha\nneedle here\ngamma\n");
+  await fs.mkdir(path.join(tmp, "sub"));
+  await fs.writeFile(path.join(tmp, "sub", "b.ts"), "const x = 1;\n// needle\n// Needle upper\n");
+  await fs.writeFile(path.join(tmp, "empty.txt"), "");
+});
+
+after(async () => {
+  if (tmp) await fs.rm(tmp, { recursive: true, force: true });
+});
+
+// ---------------- read_file ----------------
+test("read_file returns 1-based line-numbered content", async () => {
+  const out = await readFileTool.execute({ path: "a.txt" }, ctx);
+  assert.match(out, /^\s+1\talpha$/m);
+  assert.match(out, /^\s+2\tneedle here$/m);
+});
+
+test("read_file honors offset + limit", async () => {
+  const out = await readFileTool.execute({ path: "a.txt", offset: 2, limit: 1 }, ctx);
+  assert.match(out, /2\tneedle here/);
+  assert.doesNotMatch(out, /alpha/);
+});
+
+test("read_file reports a missing file as an error string", async () => {
+  const out = await readFileTool.execute({ path: "nope.txt" }, ctx);
+  assert.match(out, /file not found/);
+});
+
+test("read_file handles an empty file", async () => {
+  const out = await readFileTool.execute({ path: "empty.txt" }, ctx);
+  assert.equal(out, "(empty file)");
+});
+
+// ---------------- grep ----------------
+test("grep finds matches across a recursive directory with path:line", async () => {
+  const out = await grepTool.execute({ pattern: "needle" }, ctx);
+  assert.match(out, /a\.txt:2:/);
+  assert.match(out, /sub[\\/]b\.ts:2:/);
+});
+
+test("grep is case-sensitive by default, case-insensitive on request", async () => {
+  const sensitive = await grepTool.execute({ pattern: "Needle" }, ctx);
+  assert.match(sensitive, /b\.ts:3:/);
+  assert.doesNotMatch(sensitive, /:2:/);
+  const insensitive = await grepTool.execute({ pattern: "needle", ignoreCase: true }, ctx);
+  assert.match(insensitive, /b\.ts:2:/);
+  assert.match(insensitive, /b\.ts:3:/);
+});
+
+test("grep caps results with maxResults", async () => {
+  const out = await grepTool.execute({ pattern: "needle", ignoreCase: true, maxResults: 1 }, ctx);
+  const hits = out.split("\n").filter((l) => /:\d+:/.test(l));
+  assert.equal(hits.length, 1);
+  assert.match(out, /stopped at 1 matches/);
+});
+
+test("grep returns a no-match message and an invalid-regex error", async () => {
+  assert.match(await grepTool.execute({ pattern: "zzz_nomatch" }, ctx), /No matches/);
+  assert.match(await grepTool.execute({ pattern: "(" }, ctx), /invalid regular expression/);
+});
+
+// ---------------- registry ----------------
+test("default registry exposes read_file + grep, both read-only", () => {
+  const reg = createDefaultRegistry();
+  assert.ok(reg.has("read_file") && reg.has("grep"));
+  assert.equal(reg.get("read_file")?.readOnly, true);
+  assert.equal(reg.get("grep")?.readOnly, true);
+});
+
+test("toToolDefs produces wire-format schemas and can filter by name", () => {
+  const reg = createDefaultRegistry();
+  const all = reg.toToolDefs();
+  assert.equal(all.length, 2);
+  for (const d of all) {
+    assert.equal(d.type, "function");
+    assert.ok(d.function.name.length > 0);
+    assert.equal((d.function.parameters as { type?: string }).type, "object");
+  }
+  const onlyGrep = reg.toToolDefs(["grep"]);
+  assert.equal(onlyGrep.length, 1);
+  assert.equal(onlyGrep[0].function.name, "grep");
+});
+
+test("registry rejects duplicates and dispatches unknown tools as errors", async () => {
+  const reg = new ToolRegistry().register(readFileTool);
+  assert.throws(() => reg.register(readFileTool), /already registered/);
+  const out = await reg.dispatch("does_not_exist", {}, ctx);
+  assert.match(out, /unknown tool/);
+});
+
+test("registry.dispatch runs a real tool end-to-end", async () => {
+  const reg = createDefaultRegistry();
+  const out = await reg.dispatch("read_file", { path: "a.txt" }, ctx);
+  assert.match(out, /needle here/);
+});
+
+// ---------------- grep: bounded-parallel scan (faster, same output) ----------------
+test("grep parallel scan is deterministic and order-stable", async () => {
+  const a = await grepTool.execute({ pattern: "needle", ignoreCase: true }, ctx);
+  const b = await grepTool.execute({ pattern: "needle", ignoreCase: true }, ctx);
+  assert.equal(a, b); // identical across runs
+  assert.match(a, /a\.txt:2:/);
+  assert.match(a, /b\.ts:2:/);
+  assert.match(a, /b\.ts:3:/);
+});
+
+test("grep parallel scan honors maxResults exactly", async () => {
+  const out = await grepTool.execute({ pattern: "needle", ignoreCase: true, maxResults: 2 }, ctx);
+  const hits = out.split("\n").filter((l) => /:\d+:/.test(l));
+  assert.equal(hits.length, 2);
+  assert.match(out, /stopped at 2 matches/);
+});
+
+test("grep skips binary files", async () => {
+  await fs.writeFile(path.join(tmp, "bin.dat"), `needle${String.fromCharCode(0)}needle\n`);
+  const out = await grepTool.execute({ pattern: "needle", ignoreCase: true }, ctx);
+  assert.doesNotMatch(out, /bin\.dat/); // NUL byte => treated as binary, skipped
+});

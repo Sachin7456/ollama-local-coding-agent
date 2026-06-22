@@ -1,0 +1,15 @@
+{
+  "//": "Editor/optional-typecheck config only. The harness RUNS with zero deps via Node's native type-stripping (`node --experimental-strip-types`). Actual `tsc` type-checking would need the dev-only, security-verified `typescript` + `@types/node` packages — not required to run.",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "strict": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["src/**/*.ts", "tests/**/*.ts"]
+}

@@ -1,0 +1,31 @@
+# ---- Secrets & environment (NEVER commit) ----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+credentials.json
+
+# ---- Dependencies ----
+node_modules/
+__pycache__/
+.venv/
+
+# ---- Build / runtime ----
+dist/
+*.tsbuildinfo
+*.log
+
+# Harness runtime state (sessions + long-term memory) — created at runtime under
+# ~/.qwen-harness by default; never commit it.
+.qwen-harness/
+
+# A local user model file may name private/internal models — keep it local.
+models.json
+
+# ---- OS / editor noise ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

@@ -1,0 +1,32 @@
+// Tests the zero-dep .env parser. Zero deps.
+
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { parseDotEnv } from "../src/cli/loadEnv.ts";
+
+test("parses KEY=VALUE pairs", () => {
+  const out = parseDotEnv("OLLAMA_BASE_URL=http://127.0.0.1:11434\nHARNESS_MODEL=qwen2.5-coder:7b");
+  assert.equal(out.OLLAMA_BASE_URL, "http://127.0.0.1:11434");
+  assert.equal(out.HARNESS_MODEL, "qwen2.5-coder:7b");
+});
+
+test("ignores blank lines and # comments", () => {
+  const out = parseDotEnv("# a comment\n\n  # indented comment\nA=1\n");
+  assert.deepEqual(out, { A: "1" });
+});
+
+test("strips surrounding single/double quotes", () => {
+  const out = parseDotEnv(`A="quoted value"\nB='single'`);
+  assert.equal(out.A, "quoted value");
+  assert.equal(out.B, "single");
+});
+
+test("keeps '=' that appear in the value", () => {
+  const out = parseDotEnv("URL=http://x/?a=1&b=2");
+  assert.equal(out.URL, "http://x/?a=1&b=2");
+});
+
+test("skips lines without '=' and trims whitespace", () => {
+  const out = parseDotEnv("not_a_pair\n  KEY  =  val  ");
+  assert.deepEqual(out, { KEY: "val" });
+});
