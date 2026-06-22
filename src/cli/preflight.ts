@@ -9,12 +9,17 @@
 
 export interface PreflightInput {
   baseUrl: string;
+  /** models that MUST be installed (active + worker) — missing = fatal. */
   requiredModels: string[];
+  /** models declared (e.g. in a models file) but not necessarily used now — missing = warning. */
+  optionalModels?: string[];
 }
 
 export interface PreflightResult {
   ok: boolean;
   problems: string[];
+  /** non-fatal notices (e.g. a declared-but-not-pulled model). */
+  warnings: string[];
 }
 
 /** Minimum Node that supports `--experimental-strip-types` + `node:test`. */
@@ -43,6 +48,7 @@ export async function preflight(
   nodeVersion: string = process.version,
 ): Promise<PreflightResult> {
   const problems: string[] = [];
+  const warnings: string[] = [];
 
   const nodeProblem = nodeVersionProblem(nodeVersion);
   if (nodeProblem) problems.push(nodeProblem);
@@ -72,9 +78,14 @@ export async function preflight(
         problems.push(`Required model "${m}" is not installed.\n  • Get it with:  ollama pull ${m}`);
       }
     }
+    for (const m of input.optionalModels ?? []) {
+      if (!installed.includes(m) && !input.requiredModels.includes(m)) {
+        warnings.push(`Model "${m}" is listed in your models file but not installed yet (run: ollama pull ${m}).`);
+      }
+    }
   }
 
-  return { ok: problems.length === 0, problems };
+  return { ok: problems.length === 0, problems, warnings };
 }
 
 /** Pretty-print preflight problems for the CLI. */

@@ -14,7 +14,7 @@ import { OllamaClient } from "../model/ollamaClient.ts";
 import { createFullRegistry, ReadState, type ToolContext } from "../tools/tools.ts";
 import { createDefaultPermissions, type PermissionMode } from "../permissions/permissions.ts";
 import { runAgent, type AgentEvent, type AskInfo } from "../agent/agent.ts";
-import { resolveModel, getModels, OLLAMA_BASE_URL } from "../model/config.ts";
+import { resolveModel, resolveWorkerModel, fileRegistryModels, getModels, OLLAMA_BASE_URL } from "../model/config.ts";
 import { preflight, formatPreflight } from "../cli/preflight.ts";
 import { Semaphore } from "../orchestration/gate.ts";
 import { runOrchestrator } from "../orchestration/orchestrator.ts";
@@ -22,8 +22,6 @@ import { Session, listSessions } from "../state/session.ts";
 import { rememberTool, recallTool, buildMemoryBlock } from "../state/memory.ts";
 import { makeListModelsTool } from "../model/listModelsTool.ts";
 import type { ChatMessage } from "../model/ollamaClient.ts";
-
-const DEFAULT_WORKER_MODEL = "qwen2.5-coder:7b";
 
 const SYSTEM_PROMPT = `You are a coding assistant working in a local project directory.
 You have tools: read_file, grep, write_file, edit_file, multi_edit, bash, list_models.
@@ -134,17 +132,18 @@ async function main(): Promise<void> {
   const permissions = createDefaultPermissions(args.mode);
   const ctx: ToolContext = { cwd: process.cwd(), readState: new ReadState() };
   let activeModel = model.name;
+  // Worker model for multi-agent — REGISTRY-DRIVEN (works with any installed model, not hardcoded).
+  const workerModel = resolveWorkerModel(args.worker).name;
 
   // One-time preflight: verify prerequisites (Node, Ollama, required models) with
   // actionable guidance. Runs ONCE at startup only — no per-turn latency.
-  const requiredModels = args.multi
-    ? [...new Set([activeModel, args.worker ?? DEFAULT_WORKER_MODEL])]
-    : [activeModel];
-  const pf = await preflight({ baseUrl: OLLAMA_BASE_URL, requiredModels });
+  const requiredModels = args.multi ? [...new Set([activeModel, workerModel])] : [activeModel];
+  const pf = await preflight({ baseUrl: OLLAMA_BASE_URL, requiredModels, optionalModels: fileRegistryModels() });
   if (!pf.ok) {
     console.error(formatPreflight(pf));
     process.exit(1);
   }
+  for (const w of pf.warnings) console.warn(`⚠️  ${w}`);
 
   // Session persistence: resume an existing transcript or start a fresh one.
   let history: ChatMessage[] = [];
@@ -171,7 +170,6 @@ async function main(): Promise<void> {
 
   // Shared 2-permit gate for multi-agent mode (orchestrator + workers).
   const gate = new Semaphore(2);
-  const workerModel = args.worker ?? DEFAULT_WORKER_MODEL;
 
   // Tracks the in-flight request so Ctrl+C can abort it (and stop Ollama generating).
   let activeAbort: AbortController | null = null;

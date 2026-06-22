@@ -63,15 +63,115 @@ thinks with your local AI, and **never sends a single byte to the internet**.
 
 Three things. If someone has already set this up for you, jump ahead to section 4.
 
-1. **Ollama** — the program that runs the AI locally. Get it from the official
-   Ollama site.
-2. **The two Qwen models** on your machine:
-   - `qwen2.5-coder:7b` — the **quick** one,
-   - `qwen3-coder:30b` — the **stronger but heavier** one.
+1. **Ollama** — the program that runs AI models locally. Get it from the official Ollama
+   site, then start it once with `ollama serve`.
+2. **At least one model.** The default is **`qwen2.5-coder:7b`** (small + quick) — install it with:
+   ```
+   ollama pull qwen2.5-coder:7b
+   ```
+   - **Any Ollama model works — not just Qwen** (DeepSeek, Llama, …). See
+     **"Optional — use a different model"** just below for the exact steps.
+   - The larger `qwen3-coder:30b` is **optional** — only needed for multi-agent mode (`--multi`).
 3. **Node.js**, version **22.6 or newer** — the runtime this tool uses.
 
-> Nothing else needs installing. The tool pulls in **no outside packages** — it uses
-> only what already ships with Node.js. That simplicity is part of what keeps it safe.
+> Nothing else to install — the tool uses **no outside packages**, only what ships with
+> Node.js. On first start, a quick built-in check confirms Ollama is running and your chosen
+> model is actually installed, and tells you exactly how to fix it if not.
+
+### Optional — use a different model (DeepSeek, Llama, anything)
+
+Skip this if you're happy with the default `qwen2.5-coder:7b`. To run **any other Ollama model**,
+you point the tool at it using **two small files in the project folder** (the folder that has
+`package.json`). **Neither file exists yet — you create each one by copying the example next to it.**
+
+**Step A — pull the model in Ollama** (use your model's real tag; `ollama list` shows what you have):
+```
+ollama pull deepseek-coder:6.7b
+```
+
+**Step B — create `models.json`** by copying the example, then editing it:
+```
+# Linux / macOS
+cp models.example.json models.json
+# Windows (PowerShell)
+Copy-Item models.example.json models.json
+```
+Open `models.json` and put your model under `"models"` (copy a block and change the tag):
+```json
+{
+  "models": {
+    "deepseek-coder:6.7b": {
+      "name": "deepseek-coder:6.7b",
+      "role": "general",
+      "numCtx": 8192,
+      "keepAlive": "5m",
+      "sampling": { "temperature": 0.1, "top_p": 0.9, "top_k": 20, "repeat_penalty": 1.05 },
+      "approxSizeGB": 4
+    }
+  }
+}
+```
+
+**Step C — switch the tool to your file** by creating a `.env` file (again, copy the example):
+```
+# Linux / macOS
+cp .env.example .env
+# Windows (PowerShell)
+Copy-Item .env.example .env
+```
+Open `.env` and set these two lines:
+```
+QWEN_HARNESS_MODEL_SOURCE=file
+HARNESS_MODEL=deepseek-coder:6.7b
+```
+
+**Step D — start as usual:** `npm start`. The banner now shows your model. (You can also switch
+models any time in chat with `/model <tag>`.) If a tag is mistyped or not pulled, the first-start
+check tells you exactly what's missing.
+
+> **Where these live & what happens if they're missing:** `models.json` and `.env` sit in the
+> **project folder** (next to `package.json`). If they're absent, the tool simply uses its built-in
+> defaults (Qwen) — nothing breaks. Both are kept private to your machine (git-ignored). You set this
+> up just once.
+
+### Adding several models at once (and what `role` means)
+
+> **First, where is `models.json`?** It **does not ship** — the project only includes
+> **`models.example.json`** as a template. You create `models.json` **once** by copying it (it lives in
+> the project folder, next to `package.json`):
+> ```
+> cp models.example.json models.json            # Linux / macOS
+> Copy-Item models.example.json models.json      # Windows (PowerShell)
+> ```
+
+Then list as many models as you like in it — they ALL go in the **same `models.json`**, under
+`"models"`, **one block per model** (the key is the exact Ollama tag). Pull each one first with
+`ollama pull <tag>`.
+
+```json
+{
+  "models": {
+    "qwen3-coder:30b":     { "name": "qwen3-coder:30b",     "role": "orchestrator", "numCtx": 32768, "keepAlive": "5m", "sampling": { "temperature": 0.1, "top_p": 0.9, "top_k": 20, "repeat_penalty": 1.05 }, "approxSizeGB": 18 },
+    "qwen2.5-coder:7b":    { "name": "qwen2.5-coder:7b",    "role": "worker",       "numCtx": 8192,  "keepAlive": "5m", "sampling": { "temperature": 0.1, "top_p": 0.9, "top_k": 20, "repeat_penalty": 1.05 }, "approxSizeGB": 4.7 },
+    "deepseek-coder:6.7b": { "name": "deepseek-coder:6.7b", "role": "general",      "numCtx": 8192,  "keepAlive": "5m", "sampling": { "temperature": 0.1, "top_p": 0.9, "top_k": 20, "repeat_penalty": 1.05 }, "approxSizeGB": 4 }
+  }
+}
+```
+Add as many blocks as you have models — same shape, with a comma between them.
+
+**Every block needs:** `name` (the exact tag), `numCtx`, `keepAlive`, `sampling`, `approxSizeGB`, and `role`.
+
+**`role` is one of three:**
+- `"orchestrator"` — the lead / planner in multi-agent (`--multi`).
+- `"worker"` — the light executor in multi-agent. The worker is auto-picked as the **smallest model
+  you marked `"worker"`** — so mark your small, fast models as workers (e.g. 5 of your 10).
+- `"general"` — everyday single-agent use.
+
+**Every model shows up, whatever its role** — `/models` lists them all, and `/model <tag>` switches to
+any of them at any time. `role` only decides which model becomes the multi-agent **worker**; it never
+hides a model. (So your 5 "general" *and* 5 "worker" models all appear.)
+
+**Which one runs by default:** the **first** block, unless you set `HARNESS_MODEL=<tag>` in `.env`.
 
 ---
 

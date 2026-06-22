@@ -62,8 +62,24 @@ test("flags an old Node version", async () => {
 });
 
 test("formatPreflight renders problems for the CLI", () => {
-  const text = formatPreflight({ ok: false, problems: ["thing A", "thing B"] });
+  const text = formatPreflight({ ok: false, problems: ["thing A", "thing B"], warnings: [] });
   assert.match(text, /can't start/);
   assert.match(text, /thing A/);
   assert.match(text, /thing B/);
+});
+
+test("optionalModels: declared-but-not-installed becomes a NON-FATAL warning", async () => {
+  const r = await preflight(
+    {
+      baseUrl: "http://x",
+      requiredModels: ["qwen2.5-coder:7b"],
+      optionalModels: ["qwen2.5-coder:7b", "deepseek-coder:6.7b"],
+    },
+    fakeFetch(["qwen2.5-coder:7b"]),
+    GOOD_NODE,
+  );
+  assert.equal(r.ok, true); // warning is non-fatal
+  assert.deepEqual(r.problems, []);
+  assert.match(r.warnings.join("\n"), /deepseek-coder:6\.7b/);
+  assert.doesNotMatch(r.warnings.join("\n"), /qwen2\.5-coder:7b/); // required+installed isn't warned
 });

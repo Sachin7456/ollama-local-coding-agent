@@ -25,7 +25,7 @@ Changes to CI/workflow files and `.gitignore` receive extra scrutiny.
 
 ## Tests (required before every PR)
 
-The project keeps a passing, zero-dependency test suite of **155 tests** under `tests/`,
+The project keeps a passing, zero-dependency test suite of **162 tests** under `tests/`,
 run by Node's built-in test runner — **no model or network is required** to run it.
 `npm test` runs every test file listed in the `"test"` script in `package.json`. Before
 you open a PR:

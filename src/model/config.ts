@@ -164,6 +164,34 @@ export function resolveModel(requested?: string): ModelConfig {
   return cfg;
 }
 
+/**
+ * Resolve the WORKER model for multi-agent mode — REGISTRY-DRIVEN, so it works with ANY
+ * installed models (not a hardcoded tag). Precedence: explicit `requested` (if it's a valid tag) >
+ * the SMALLEST model the user marked `role:"worker"` (so role assignments are honored) > the
+ * smallest model overall > the registry default. Always returns a model from the active registry.
+ */
+export function resolveWorkerModel(requested?: string): ModelConfig {
+  const models = getModels();
+  if (requested && models[requested]) return models[requested];
+  const all = Object.values(models);
+  // Prefer models the user explicitly marked role:"worker"; if none, fall back to all models.
+  const workers = all.filter((m) => m.role === "worker");
+  const pool = workers.length > 0 ? workers : all;
+  const sized = pool.filter((m) => typeof m.approxSizeGB === "number");
+  if (sized.length > 0) {
+    return sized.reduce((smallest, m) => (m.approxSizeGB < smallest.approxSizeGB ? m : smallest));
+  }
+  return pool[0] ?? models[defaultModelFor(models)];
+}
+
+/**
+ * When the model source is "file", the model tags declared in that file (else []).
+ * Used at startup to warn about models a user listed but hasn't pulled.
+ */
+export function fileRegistryModels(): string[] {
+  return modelSource() === "file" ? Object.keys(getModels()) : [];
+}
+
 /** Build the full harness config, with an optional model override. */
 export function loadConfig(modelOverride?: string): HarnessConfig {
   const models = getModels();
