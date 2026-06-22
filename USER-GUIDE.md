@@ -69,8 +69,10 @@ Three things. If someone has already set this up for you, jump ahead to section 
    ```
    ollama pull qwen2.5-coder:7b
    ```
-   - **Any Ollama model works — not just Qwen** (DeepSeek, Llama, …). See
-     **"Optional — use a different model"** just below for the exact steps.
+   - **Use a tool-capable model — not just Qwen** (DeepSeek-Coder, Llama 3.1, Mistral-Nemo, …).
+     ⚠️ The model **must support tool-calling (function calling)** — this is a tool-using agent.
+     Models like **gemma / phi** do **not** support tools and will fail. See
+     **"Optional — use a different model"** just below.
    - The larger `qwen3-coder:30b` is **optional** — only needed for multi-agent mode (`--multi`).
 3. **Node.js**, version **22.6 or newer** — the runtime this tool uses.
 
@@ -83,6 +85,13 @@ Three things. If someone has already set this up for you, jump ahead to section 
 Skip this if you're happy with the default `qwen2.5-coder:7b`. To run **any other Ollama model**,
 you point the tool at it using **two small files in the project folder** (the folder that has
 `package.json`). **Neither file exists yet — you create each one by copying the example next to it.**
+
+> ⚠️ **The model MUST support tool-calling (function calling).** This is a *tool-using* agent — it
+> sends tools (read · write · edit · bash) on every request. Models that support tools include
+> **qwen2.5-coder, qwen3-coder, llama3.1 / 3.2 / 3.3, mistral-nemo, mistral, command-r**. Models that
+> do **not** — e.g. **gemma / gemma2 / gemma3, phi** — will fail at the first step with
+> `400 … does not support tools`. Unsure? Run `ollama show <model>` and check for **tools** under its
+> capabilities. (Also pick a capable *coder* model for good results — tiny models struggle with the loop.)
 
 **Step A — pull the model in Ollama** (use your model's real tag; `ollama list` shows what you have):
 ```

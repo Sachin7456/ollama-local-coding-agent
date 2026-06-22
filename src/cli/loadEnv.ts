@@ -38,7 +38,10 @@ export function loadDotEnv(file = ".env"): void {
     return; // no .env — perfectly fine
   }
   for (const [key, value] of Object.entries(parseDotEnv(text))) {
-    if (process.env[key] === undefined) process.env[key] = value;
+    // Treat an empty value (e.g. the `KEY=` placeholder lines in .env.example) as UNSET, so the
+    // code's defaults apply. Otherwise an empty string would override a default — e.g. an empty
+    // QWEN_HARNESS_MODELS_FILE made the path resolve to the project dir → "could not read".
+    if (value !== "" && process.env[key] === undefined) process.env[key] = value;
   }
 }
 

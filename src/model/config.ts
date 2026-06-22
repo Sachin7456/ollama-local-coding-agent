@@ -159,7 +159,11 @@ export function resolveModel(requested?: string): ModelConfig {
   const cfg = models[tag];
   if (!cfg) {
     const known = Object.keys(models).join(", ");
-    throw new Error(`Unknown model "${tag}". Known models: ${known}`);
+    throw new Error(
+      `Unknown model "${tag}". Known models: ${known}.\n` +
+        `  • To use your own model: pull it in Ollama, add it to models.json, and set ` +
+        `QWEN_HARNESS_MODEL_SOURCE=file (copy models.example.json to start).`,
+    );
   }
   return cfg;
 }

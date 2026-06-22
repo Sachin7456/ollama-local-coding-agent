@@ -1,20 +1,25 @@
 // Tests the model-source toggle: "builtin" (fast default) vs "file" (user-editable),
 // plus safe fallback to built-in when the file is missing/invalid. Zero deps.
 
-import { test, afterEach } from "node:test";
+import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { getModels, resolveModel, resolveWorkerModel, fileRegistryModels, MODELS, DEFAULT_MODEL_SOURCE } from "../src/model/config.ts";
+import { loadDotEnv } from "../src/cli/loadEnv.ts";
 
 const S = { temperature: 0.1, top_p: 0.9, top_k: 20, repeat_penalty: 1.05 };
 
-afterEach(() => {
+function clearModelEnv(): void {
   delete process.env.QWEN_HARNESS_MODEL_SOURCE;
   delete process.env.QWEN_HARNESS_MODELS_FILE;
   delete process.env.HARNESS_MODEL;
-});
+}
+// Clear BEFORE each test too: a developer's local .env (auto-loaded when loadEnv.ts is imported)
+// must not leak in and flip the default model source to "file".
+beforeEach(clearModelEnv);
+afterEach(clearModelEnv);
 
 function writeModelsFile(models: unknown): string {
   const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "qh-models-")), "models.json");
@@ -138,4 +143,30 @@ test("fileRegistryModels: [] for builtin source, the file's tags when source=fil
   process.env.QWEN_HARNESS_MODEL_SOURCE = "file";
   process.env.QWEN_HARNESS_MODELS_FILE = file;
   assert.deepEqual(fileRegistryModels().sort(), ["m1:1", "m2:1"]);
+});
+
+// ---------------- regression: I-009 (an empty .env value broke file source) ----------------
+// Fully generic — a temp dir + an arbitrary model tag (no hardcoded path or model), so it holds
+// for ANY user, on any machine, with no real Ollama model needed.
+test("regression I-009: an EMPTY QWEN_HARNESS_MODELS_FILE in .env still loads the file registry", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "qh-i009-"));
+  const tag = "any-user-model:latest"; // not Qwen — proves it isn't model-specific
+  fs.writeFileSync(
+    path.join(dir, "models.json"),
+    JSON.stringify({ models: { [tag]: { name: tag, role: "general", numCtx: 8192, keepAlive: "5m", sampling: S, approxSizeGB: 5 } } }),
+  );
+  // A .env exactly like one copied from .env.example: file source ON, but MODELS_FILE left EMPTY.
+  fs.writeFileSync(path.join(dir, ".env"), `QWEN_HARNESS_MODEL_SOURCE=file\nQWEN_HARNESS_MODELS_FILE=\nHARNESS_MODEL=${tag}\n`);
+
+  const prevCwd = process.cwd();
+  try {
+    process.chdir(dir); // so the default "./models.json" resolves inside the temp dir
+    loadDotEnv(path.join(dir, ".env"));
+    // the empty value must be SKIPPED (the fix) — otherwise the path resolved to the directory
+    assert.equal(process.env.QWEN_HARNESS_MODELS_FILE, undefined);
+    assert.equal(getModels()[tag]?.name, tag); // file registry loaded (no "could not read <dir>")
+    assert.equal(resolveModel().name, tag); // resolves the user's model — no "Unknown model" crash
+  } finally {
+    process.chdir(prevCwd);
+  }
 });

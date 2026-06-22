@@ -123,7 +123,15 @@ async function main(): Promise<void> {
     return;
   }
 
-  const model = resolveModel(args.model);
+  const model = (() => {
+    try {
+      return resolveModel(args.model);
+    } catch (e) {
+      // A config error (e.g. an unknown model) — show the helpful message, not a raw stack trace.
+      console.error(`\n⛔ ${(e as Error).message}\n`);
+      process.exit(1);
+    }
+  })();
   const client = new OllamaClient();
   const registry = createFullRegistry()
     .register(rememberTool)
