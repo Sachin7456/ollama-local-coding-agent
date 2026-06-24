@@ -25,13 +25,20 @@ import type { ChatMessage } from "../model/ollamaClient.ts";
 
 const SYSTEM_PROMPT = `You are a coding assistant working in a local project directory.
 You have tools: read_file, grep, write_file, edit_file, multi_edit, bash, list_models.
-Rules:
-- To inspect or change files you MUST use the tools — never guess file contents.
-- Always read_file a file before you edit_file/multi_edit it; copy text verbatim.
-- For several changes to one file in a single step, prefer multi_edit (atomic).
-- To see which models are installed locally, use list_models (don't guess).
-- Use bash to run shell commands — builds, tests, git, and environment/system queries (e.g. \`ollama list\`, \`node -v\`) — but not for reading or editing files.
-- Be concise. When the task is finished, reply with a 1-2 sentence summary (no tool call).`;
+
+How to work:
+- To inspect or change anything, CALL a tool — reading, searching, and editing happen only through tools.
+- Always read_file a file before you edit_file/multi_edit it; copy the text to change verbatim.
+- For several edits to one file in one step, prefer multi_edit (it applies atomically).
+- Use bash for shell commands — builds, tests, git, and environment checks like \`ollama list\` or \`node -v\` — never to read or edit files.
+- To see which models are installed locally, call list_models (don't guess).`;
+
+// Kept SEPARATE so it is always the LAST thing the model reads (recency matters for small models),
+// even when a memory block is inserted before it.
+const CRITICAL_RULES = `Most important — every turn:
+- Do NOT say you can, could, or will do something. DO it by calling the tool. "I can read that file" is wrong; calling read_file is right.
+- Each turn either CALL a tool (one or more) to make progress, OR give your final answer — never neither.
+- Give the final answer only when the task is actually done: a 1-2 sentence summary, with no tool call.`;
 
 interface CliArgs {
   model?: string;
@@ -197,7 +204,8 @@ async function main(): Promise<void> {
     const onMessage = (m: ChatMessage): void => session.appendMessage(m);
     const compaction = { numCtx: resolveModel(activeModel).numCtx, threshold: 0.75, keepRecent: 8, toolResultCap: 2000 };
     const memBlock = buildMemoryBlock(text);
-    const sysPrompt = memBlock ? `${SYSTEM_PROMPT}\n\n${memBlock}` : SYSTEM_PROMPT;
+    const base = memBlock ? `${SYSTEM_PROMPT}\n\n${memBlock}` : SYSTEM_PROMPT;
+    const sysPrompt = `${base}\n\n${CRITICAL_RULES}`; // critical rules LAST (recency for small models)
     const ac = new AbortController();
     activeAbort = ac;
     try {

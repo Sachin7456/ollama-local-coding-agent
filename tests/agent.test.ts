@@ -271,6 +271,96 @@ test("loop recovers a content-embedded tool call (qwen2.5 style) and runs it", a
   }
 });
 
+// ---------------- think-strip + idle nudge (small-model "act, don't narrate") ----------------
+test("a thinking-only turn is nudged once, then the model acts", async () => {
+  const m = await scriptedModel((i) =>
+    i === 0
+      ? { content: "<think>I can read the dir</think>" } // empty after strip, no tool call
+      : i === 1
+        ? { tool_calls: [toolCall("read_file", { path: "a.txt" })] }
+        : { content: "Done reading." },
+  );
+  try {
+    const res = await runAgent({
+      client: m.client,
+      registry: createDefaultRegistry(),
+      permissions: createDefaultPermissions("default"),
+      ctx: { cwd: tmp },
+      userMessage: "explain the folder",
+    });
+    assert.equal(res.stopReason, "completed");
+    assert.equal(res.turns, 3);
+    assert.equal(m.callCount(), 3);
+    assert.ok(
+      res.messages.some((x) => x.role === "user" && /did not call a tool/.test(x.content ?? "")),
+      "a corrective nudge was injected",
+    );
+    assert.match(res.text, /Done reading/);
+  } finally {
+    await m.close();
+  }
+});
+
+test("a <think> + real-answer turn completes with clean text and no nudge", async () => {
+  const m = await scriptedModel(() => ({ content: "<think>plan plan</think>The folder has 3 files." }));
+  try {
+    const res = await runAgent({
+      client: m.client,
+      registry: createDefaultRegistry(),
+      permissions: createDefaultPermissions("default"),
+      ctx: { cwd: tmp },
+      userMessage: "x",
+    });
+    assert.equal(res.turns, 1);
+    assert.equal(res.stopReason, "completed");
+    assert.equal(res.text, "The folder has 3 files."); // reasoning stripped, answer kept
+    assert.ok(!res.text.includes("<think>") && !res.text.includes("plan"));
+    assert.equal(m.callCount(), 1);
+  } finally {
+    await m.close();
+  }
+});
+
+test("a model that only ever thinks is nudged once, then stops (no infinite loop)", async () => {
+  const m = await scriptedModel(() => ({ content: "<think>still thinking…</think>" }));
+  try {
+    const res = await runAgent({
+      client: m.client,
+      registry: createDefaultRegistry(),
+      permissions: createDefaultPermissions("default"),
+      ctx: { cwd: tmp },
+      userMessage: "x",
+    });
+    assert.equal(res.stopReason, "completed");
+    assert.equal(res.turns, 2); // turn 1 nudged, turn 2 capped -> stop
+    assert.equal(m.callCount(), 2);
+    assert.equal(res.text, "");
+  } finally {
+    await m.close();
+  }
+});
+
+test("plain prose with no tool call is still accepted as the final answer (no nudge)", async () => {
+  const m = await scriptedModel(() => ({ content: "I think the answer is 42." }));
+  try {
+    const res = await runAgent({
+      client: m.client,
+      registry: createDefaultRegistry(),
+      permissions: createDefaultPermissions("default"),
+      ctx: { cwd: tmp },
+      userMessage: "x",
+    });
+    assert.equal(res.turns, 1);
+    assert.match(res.text, /42/);
+    assert.ok(
+      !res.messages.some((x) => x.role === "user" && /did not call a tool/.test(x.content ?? "")),
+      "no nudge for non-empty prose",
+    );
+  } finally {
+    await m.close();
+  }
+});
+
 // ---------------- parallel tool calls (multiple in one turn) ----------------
 test("runs multiple read tool calls in one turn, recording results in tool_call order", async () => {
   await fs.writeFile(path.join(tmp, "p1.txt"), "FIRST file\n");

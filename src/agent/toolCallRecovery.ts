@@ -17,10 +17,28 @@ export interface RecoveredCalls {
   cleanedText: string;
 }
 
+/**
+ * Remove qwen3-style `<think>…</think>` reasoning from model content. Pure + idempotent.
+ * Handles paired blocks, a lone leading `</think>` (the open tag eaten by the chat template),
+ * and an unclosed/truncated `<think>` — so reasoning never masquerades as a final answer or
+ * derails JSON extraction. (No-op when a model returns reasoning in a separate field instead.)
+ */
+export function stripThink(content: string): string {
+  if (!content) return content;
+  let out = content.replace(/<think>[\s\S]*?<\/think>/gi, "");
+  const close = out.search(/<\/think>/i);
+  if (close >= 0 && !/<think>/i.test(out.slice(0, close))) {
+    out = out.slice(close).replace(/<\/think>/i, "");
+  }
+  out = out.replace(/<think>[\s\S]*$/i, "");
+  return out.trim();
+}
+
 export function recoverToolCallsFromContent(
   content: string,
   isKnownTool?: (name: string) => boolean,
 ): RecoveredCalls {
+  content = stripThink(content); // reasoning must never be parsed as a call or masquerade as text
   if (!content || !content.trim()) return { toolCalls: [], cleanedText: content };
   let text = content;
   const calls: ToolCall[] = [];

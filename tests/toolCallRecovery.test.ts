@@ -2,7 +2,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { recoverToolCallsFromContent, extractJsonObject } from "../src/agent/toolCallRecovery.ts";
+import { recoverToolCallsFromContent, extractJsonObject, stripThink } from "../src/agent/toolCallRecovery.ts";
 
 const known = (n: string) => ["read_file", "grep", "bash"].includes(n);
 
@@ -49,4 +49,20 @@ test("plain prose stays untouched", () => {
 test("extractJsonObject pulls the first balanced object out of prose", () => {
   assert.deepEqual(extractJsonObject('blah {"a": {"b": 1}} trailing'), { a: { b: 1 } });
   assert.equal(extractJsonObject("no json here"), null);
+});
+
+// ---------------- stripThink (qwen3 <think>…</think> reasoning) ----------------
+test("stripThink removes reasoning and keeps the answer", () => {
+  assert.equal(stripThink("<think>plan plan</think>The file is empty."), "The file is empty.");
+  assert.equal(stripThink("</think>answer"), "answer"); // lone leading close (open eaten by template)
+  assert.equal(stripThink("<think>truncated reasoning"), ""); // unclosed
+  assert.equal(stripThink("no tags here"), "no tags here");
+  assert.equal(stripThink(""), "");
+});
+
+test("strips a <think> block, then recovers the embedded tool call", () => {
+  const r = recoverToolCallsFromContent('<think>I should read it</think>{"name":"read_file","arguments":{"path":"a.txt"}}', known);
+  assert.equal(r.toolCalls.length, 1);
+  assert.equal(r.toolCalls[0].function.name, "read_file");
+  assert.equal(r.cleanedText, "");
 });

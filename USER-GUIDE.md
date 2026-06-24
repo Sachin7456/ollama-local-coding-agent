@@ -91,7 +91,12 @@ you point the tool at it using **two small files in the project folder** (the fo
 > **qwen2.5-coder, qwen3-coder, llama3.1 / 3.2 / 3.3, mistral-nemo, mistral, command-r**. Models that
 > do **not** — e.g. **gemma / gemma2 / gemma3, phi** — will fail at the first step with
 > `400 … does not support tools`. Unsure? Run `ollama show <model>` and check for **tools** under its
-> capabilities. (Also pick a capable *coder* model for good results — tiny models struggle with the loop.)
+> capabilities.
+>
+> **Pick a 7B+ tool-capable coder model** (e.g. `qwen2.5-coder:7b`). Tool-calling becomes reliable only
+> around ~7B; **3B / 0.6B models often *narrate* ("I can read that file") instead of calling the tool**,
+> even with a good prompt. The harness nudges once when a turn does nothing, but smaller models stay
+> best-effort — for real work, use 7B+.
 
 **Step A — pull the model in Ollama** (use your model's real tag; `ollama list` shows what you have):
 ```

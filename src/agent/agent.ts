@@ -12,7 +12,7 @@
 import { OllamaClient, type ChatMessage, type ToolCall, type ChatResult } from "../model/ollamaClient.ts";
 import { ToolRegistry, type ToolContext } from "../tools/tools.ts";
 import { PermissionEngine, requestFromTool, type PermissionDecision } from "../permissions/permissions.ts";
-import { recoverToolCallsFromContent } from "../agent/toolCallRecovery.ts";
+import { recoverToolCallsFromContent, stripThink } from "../agent/toolCallRecovery.ts";
 import { Semaphore } from "../orchestration/gate.ts";
 import { shouldCompact, compactConversation, truncateToolResults, type CompactionOptions } from "../state/compaction.ts";
 
@@ -72,6 +72,9 @@ export interface AgentResult {
 
 const MAX_TURNS_DEFAULT = 10;
 const MAX_CONSECUTIVE_DENIALS = 3;
+const MAX_CONSECUTIVE_NUDGES = 1; // one reminder when a turn does nothing; resets on tool-call progress
+const NO_ACTION_NUDGE =
+  "You did not call a tool or give an answer. Either call a tool now to do the work, or give your final answer.";
 
 // How a resolved tool call moves the denial circuit-breaker counter.
 type DenialEffect = "reset" | "increment" | "none";
@@ -105,6 +108,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentResult> {
   record({ role: "user", content: opts.userMessage });
 
   let consecutiveDenials = 0;
+  let consecutiveNudges = 0;
 
   for (let turn = 1; turn <= maxTurns; turn++) {
     // Stop before spending a generation if the run was aborted (Ctrl+C / exit).
@@ -131,10 +135,11 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentResult> {
       throw err;
     }
 
-    // Local models (esp. qwen2.5) often emit a tool call as JSON in `content`
-    // instead of the structured tool_calls array — recover it.
+    // Local models (esp. qwen2.5) often emit a tool call as JSON in `content` instead of the
+    // structured tool_calls array — recover it. Strip qwen3 <think>…</think> FIRST so reasoning
+    // never counts as a final answer or derails recovery.
     let toolCalls = result.toolCalls;
-    let assistantText = result.text;
+    let assistantText = stripThink(result.text);
     if (toolCalls.length === 0 && assistantText.trim()) {
       const recovered = recoverToolCallsFromContent(assistantText, (n) => opts.registry.has(n));
       if (recovered.toolCalls.length > 0) {
@@ -150,11 +155,21 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentResult> {
     });
     emit({ type: "assistant", text: assistantText, toolCalls, turn });
 
-    // No tool calls => the model is answering. Done.
+    // No tool calls.
     if (toolCalls.length === 0) {
+      // Idle guard: a turn that neither called a tool nor produced real text (e.g. thinking-only).
+      // Nudge the model to act ONCE (resets on progress) so a weak model can't silently stall.
+      // Non-empty prose is still accepted as the final answer (narration is indistinguishable
+      // from a genuine short answer).
+      if (assistantText.trim().length === 0 && consecutiveNudges < MAX_CONSECUTIVE_NUDGES) {
+        consecutiveNudges++;
+        record({ role: "user", content: NO_ACTION_NUDGE });
+        continue;
+      }
       emit({ type: "done", reason: "model returned a final answer", turns: turn });
       return { text: assistantText, messages, turns: turn, stopReason: "completed" };
     }
+    consecutiveNudges = 0; // a tool call = progress — allow future nudges again
 
     // Resolve a single tool call's decision WITHOUT dispatching it yet. Interactive
     // onAsk is awaited here (phase A) so prompts never race. Does not mutate
