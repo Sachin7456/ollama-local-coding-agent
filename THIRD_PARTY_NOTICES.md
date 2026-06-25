@@ -225,6 +225,7 @@ implemented across many open-source projects. We credit those foundations here, 
 - **Multi-agent orchestration:** AutoGen — <https://arxiv.org/abs/2308.08155> · MetaGPT — <https://arxiv.org/abs/2308.00352> · CAMEL — <https://arxiv.org/abs/2303.17760>
 - **Reflection / verification (for the planned verify step):** Reflexion — <https://arxiv.org/abs/2303.11366> · Self-Refine — <https://arxiv.org/abs/2303.17651> · CRITIC — <https://arxiv.org/abs/2305.11738> · LLM-as-a-Judge — <https://arxiv.org/abs/2306.05685>
 - **Reliable tool use on small/local models (act, don't narrate):** ReAct (above) · CodeAct — executable code actions — <https://arxiv.org/abs/2402.01030> · Berkeley Function-Calling Leaderboard (BFCL) — <https://gorilla.cs.berkeley.edu/leaderboard.html>
+- **Agent loop / no-progress detection (stop a stuck model):** Overthinking/cyclic-tool loops — <https://arxiv.org/abs/2602.14798> · Repetition in production — <https://arxiv.org/abs/2512.04419>
 
 ### Similar open-source projects (permissive — MIT / Apache-2.0)
 | Technique in this project | Representative open-source projects (license) |
@@ -235,6 +236,9 @@ implemented across many open-source projects. We credit those foundations here, 
 | Permission allow / ask / deny + modes | [Cline](https://github.com/cline/cline) (Apache-2.0) · [Continue](https://github.com/continuedev/continue) (Apache-2.0 — `allow/ask/exclude`) |
 | Tool-call recovery for local models | [Goose](https://github.com/block/goose) (Apache-2.0 — Ollama tool shim) · [gptme](https://github.com/gptme/gptme) (MIT) |
 | "Act, don't narrate" prompt + idle no-action nudge + reasoning-token strip | [smolagents](https://github.com/huggingface/smolagents) (Apache-2.0) · [OpenHands](https://github.com/OpenHands/OpenHands) (MIT) · [Aider](https://github.com/Aider-AI/aider) (Apache-2.0) · [Roo-Code](https://github.com/RooCodeInc/Roo-Code) (Apache-2.0) · [LangGraph](https://github.com/langchain-ai/langgraph) (MIT) · [Qwen-Agent](https://github.com/QwenLM/Qwen-Agent) (Apache-2.0) |
+| Loop / repeated-action detection (fingerprint tool+args; stop a stuck model) | [OpenHands](https://github.com/OpenHands/OpenHands) (MIT — `StuckDetector`) · [LangGraph](https://github.com/langchain-ai/langgraph) (MIT — `recursion_limit`) · [Deer-Flow](https://github.com/bytedance/deer-flow) (Apache-2.0 — loop middleware) |
+| Safe read-only shell-command classification (allowlist + reject shell metacharacters; "reject, don't escape") | [OWASP Command Injection](https://owasp.org/www-community/attacks/Command_Injection) · [PortSwigger Web Security Academy](https://portswigger.net/web-security/os-command-injection) |
+| File-finding (glob) tool + glob→regex matching | [Continue](https://github.com/continuedev/continue) (Apache-2.0 — `globSearch`) · [Roo-Code](https://github.com/RooCodeInc/Roo-Code) (Apache-2.0 — `list_files`) · [picomatch](https://github.com/micromatch/picomatch) / [minimatch](https://github.com/isaacs/minimatch) (MIT — glob→regex technique) |
 | Context compaction (keep tail + summarize) | [LangChain](https://github.com/langchain-ai/langchain) (MIT) · [LlamaIndex](https://github.com/run-llama/llama_index) (MIT) · [Letta / MemGPT](https://github.com/letta-ai/letta) (Apache-2.0) |
 | Long-term memory injection | [mem0](https://github.com/mem0ai/mem0) (Apache-2.0) · [Letta](https://github.com/letta-ai/letta) (Apache-2.0) |
 | Session persistence (append-only transcript + resume) | [Plandex](https://github.com/plandex-ai/plandex) (MIT) · [Cline](https://github.com/cline/cline) (Apache-2.0) |

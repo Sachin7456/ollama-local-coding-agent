@@ -103,6 +103,24 @@ test("parseChatResponse tolerates string-encoded tool arguments + missing fields
   assert.equal(r.text, "");
 });
 
+test("parseChatResponse captures non-function-wrapped tool calls (weak-model shapes)", () => {
+  const r = parseChatResponse({
+    message: { content: "", tool_calls: [{ name: "read_file", arguments: { path: "x" } }] },
+  });
+  assert.equal(r.toolCalls.length, 1);
+  assert.equal(r.toolCalls[0].function.name, "read_file");
+  assert.deepEqual(r.toolCalls[0].function.arguments, { path: "x" });
+});
+
+test("parseChatResponse handles {tool, params} and DROPS nameless entries", () => {
+  const r = parseChatResponse({
+    message: { content: "", tool_calls: [{ tool: "grep", params: { pattern: "y" } }, { function: {} }] },
+  });
+  assert.equal(r.toolCalls.length, 1); // the nameless {function:{}} is filtered out (re-enables content recovery)
+  assert.equal(r.toolCalls[0].function.name, "grep");
+  assert.deepEqual(r.toolCalls[0].function.arguments, { pattern: "y" });
+});
+
 // ---------- transport: OllamaClient against a mock server ----------
 test("OllamaClient.chat sends correct body to /api/chat and parses the reply", async () => {
   const srv = await mockServer(() => ({

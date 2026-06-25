@@ -53,7 +53,7 @@ const AGENTIC_SAMPLING: SamplingParams = {
   temperature: 0.1,
   top_p: 0.9,
   top_k: 20,
-  repeat_penalty: 1.05,
+  repeat_penalty: 1.1,
 };
 
 /**

@@ -164,7 +164,7 @@ export const readFileTool: Tool = {
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code === "ENOENT") return `Error: file not found: ${rel}`;
-      if (code === "EISDIR") return `Error: ${rel} is a directory, not a file.`;
+      if (code === "EISDIR") return `Error: ${rel} is a directory — use bash \`ls\` to list it.`;
       return `Error reading ${rel}: ${(err as Error).message}`;
     }
     // Record the read so edit_file can enforce read-before-edit.
@@ -655,9 +655,121 @@ export const bashTool: Tool = {
   },
 };
 
+// ----------------------------- find_files -----------------------------
+
+export const FIND_FILES_MAX_RESULTS = 100;
+
+/**
+ * Translate a glob pattern to an anchored RegExp. Supports `*` (within one path segment),
+ * `**` (spans directories), `?` (one non-slash char), `{a,b}` alternation, and `[abc]` classes.
+ * Extglob (`!()/+()/*()/@()`) is intentionally NOT supported: those nested quantifiers are the
+ * picomatch ReDoS class (CVE-2026-33671), and a strict syntax allowlist is the recommended
+ * mitigation — with only the forms below there are no nested quantifiers, so matching stays linear.
+ */
+export function patternToRegExp(pattern: string): RegExp {
+  let re = "";
+  let depth = 0; // {...} brace nesting
+  let inClass = false; // inside [...]
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i];
+    if (inClass) {
+      if (c === "]") {
+        re += "]";
+        inClass = false;
+      } else if (c === "\\") {
+        re += "\\\\";
+      } else {
+        re += c; // characters inside a class are literal
+      }
+      continue;
+    }
+    if (c === "*") {
+      if (pattern[i + 1] === "*") {
+        i++; // consume the second '*'
+        if (pattern[i + 1] === "/") {
+          i++; // consume the '/' too
+          re += "(?:.*/)?"; // `**/` → an optional any-depth directory prefix
+        } else {
+          re += ".*"; // `**` at a segment end → anything
+        }
+      } else {
+        re += "[^/]*"; // `*` stays within one segment
+      }
+    } else if (c === "?") {
+      re += "[^/]";
+    } else if (c === "[") {
+      re += "[";
+      inClass = true;
+    } else if (c === "{") {
+      re += "(";
+      depth++;
+    } else if (c === "}") {
+      if (depth > 0) {
+        re += ")";
+        depth--;
+      } else {
+        re += "\\}";
+      }
+    } else if (c === ",") {
+      re += depth > 0 ? "|" : ",";
+    } else if (".+^$()|\\".includes(c)) {
+      re += "\\" + c; // escape regex specials
+    } else {
+      re += c;
+    }
+  }
+  return new RegExp(`^${re}$`);
+}
+
+/** Find files by name / glob pattern (read-only). Reuses walkFiles for the (pruned) traversal. */
+export const findFilesTool: Tool = {
+  name: "find_files",
+  description:
+    "Find files by name or glob pattern (e.g. `*.ts`, `src/**/*.ts`, `**/README.md`). Returns matching " +
+    "paths relative to the search directory. Read-only. Skips .git, node_modules, and hidden entries.",
+  readOnly: true,
+  parameters: {
+    type: "object",
+    properties: {
+      pattern: { type: "string", description: "Glob pattern: `*` (one segment), `**` (any depth), `?`, `{a,b}`, `[abc]`." },
+      path: { type: "string", description: "Directory to search under, relative to the workspace or absolute (default: workspace root)." },
+    },
+    required: ["pattern"],
+    additionalProperties: false,
+  },
+  async execute(args, ctx) {
+    const pattern = asString(args.pattern);
+    if (!pattern) return "Error: 'pattern' is required.";
+    const rel = asString(args.path) || ".";
+    const root = path.resolve(ctx.cwd, rel);
+    let regex: RegExp;
+    try {
+      regex = patternToRegExp(pattern);
+    } catch {
+      return `Error: invalid pattern: ${pattern}`;
+    }
+    const matches: string[] = [];
+    await walkFiles(root, async (fileAbs) => {
+      if (path.basename(fileAbs).startsWith(".")) return true; // skip hidden files (walkFiles already skips hidden dirs)
+      const relPath = path.relative(root, fileAbs).split(path.sep).join("/");
+      if (regex.test(relPath)) matches.push(relPath);
+      return true; // collect all (the tree is already pruned), then sort + slice
+    });
+    if (matches.length === 0) return `No files match: ${pattern}`;
+    matches.sort();
+    const shown = matches.slice(0, FIND_FILES_MAX_RESULTS);
+    return (
+      shown.join("\n") +
+      (matches.length > FIND_FILES_MAX_RESULTS
+        ? `\n... (${matches.length - FIND_FILES_MAX_RESULTS} more; showing the first ${FIND_FILES_MAX_RESULTS} — narrow the pattern)`
+        : "")
+    );
+  },
+};
+
 /** A registry with the read-only built-ins only. */
 export function createDefaultRegistry(): ToolRegistry {
-  return new ToolRegistry().register(readFileTool).register(grepTool);
+  return new ToolRegistry().register(readFileTool).register(grepTool).register(findFilesTool);
 }
 
 /** A registry with all built-ins, including mutating tools (write/edit/bash). */
@@ -665,6 +777,7 @@ export function createFullRegistry(): ToolRegistry {
   return new ToolRegistry()
     .register(readFileTool)
     .register(grepTool)
+    .register(findFilesTool)
     .register(writeFileTool)
     .register(editFileTool)
     .register(multiEditTool)

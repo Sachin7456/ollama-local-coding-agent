@@ -34,6 +34,8 @@ thinks with your local AI, and **never sends a single byte to the internet**.
   so the file is never left half-changed.
 - **Run commands** — "Run the tests and tell me whether they pass."
 - **Check your setup** — "Which models do I have installed?" (it can list your local models).
+- **Explore a project** — "Read this project and tell me what it does." It uses `find_files` (e.g. `**/*.ts`) and bash to list/find files, then reads the key ones. For a big whole-project job,
+  give it more steps: `npm start -- --max-turns 40 "..."`.
 - **Handle multi-step jobs** — it reads, plans, acts, checks the result, and keeps
   going until the task is finished. When several steps don't depend on each other
   (such as reading or searching across a few files), it can run them at the same
@@ -96,7 +98,8 @@ you point the tool at it using **two small files in the project folder** (the fo
 > **Pick a 7B+ tool-capable coder model** (e.g. `qwen2.5-coder:7b`). Tool-calling becomes reliable only
 > around ~7B; **3B / 0.6B models often *narrate* ("I can read that file") instead of calling the tool**,
 > even with a good prompt. The harness nudges once when a turn does nothing, but smaller models stay
-> best-effort — for real work, use 7B+.
+> best-effort — for real work, use 7B+. (If a model gets stuck repeating the same action, the harness
+> stops it with `[stopped: loop]` instead of grinding on.)
 
 **Step A — pull the model in Ollama** (use your model's real tag; `ollama list` shows what you have):
 ```
@@ -261,6 +264,11 @@ runs a command**, it pauses and asks:
 A small set of **clearly destructive commands** — for instance, anything that would
 erase everything — is **blocked automatically**. It won't run them, and it won't
 even ask.
+
+Conversely, **safe read-only commands** — listing and finding files, searching, and
+inspecting the machine (`ls`, `find`, `grep`, `ps`, `git status`) — run **automatically
+without a prompt**, so exploring a project stays friction-free. Anything that could change
+something still asks.
 
 ---
 

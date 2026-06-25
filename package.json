@@ -6,7 +6,7 @@
   "description": "A zero-dependency TypeScript agentic harness for local Qwen models via Ollama",
   "license": "Apache-2.0",
   "scripts": {
-    "test": "node --experimental-strip-types --test tests/config.test.ts tests/ollamaClient.test.ts tests/tools.test.ts tests/permissions.test.ts tests/agent.test.ts tests/toolCallRecovery.test.ts tests/mutating-tools.test.ts tests/multi-edit.test.ts tests/gate.test.ts tests/orchestrator.test.ts tests/streaming.test.ts tests/session.test.ts tests/compaction.test.ts tests/memory.test.ts tests/list-models.test.ts tests/secret-scan.test.ts tests/config-models.test.ts tests/preflight.test.ts tests/env.test.ts tests/repo-hygiene.test.ts",
+    "test": "node --experimental-strip-types --test tests/config.test.ts tests/ollamaClient.test.ts tests/tools.test.ts tests/permissions.test.ts tests/agent.test.ts tests/toolCallRecovery.test.ts tests/mutating-tools.test.ts tests/multi-edit.test.ts tests/gate.test.ts tests/orchestrator.test.ts tests/streaming.test.ts tests/session.test.ts tests/compaction.test.ts tests/memory.test.ts tests/secret-scan.test.ts tests/config-models.test.ts tests/preflight.test.ts tests/env.test.ts tests/repo-hygiene.test.ts",
     "test:m0": "node --experimental-strip-types --test tests/config.test.ts",
     "test:m1": "node --experimental-strip-types --test tests/ollamaClient.test.ts",
     "test:m2": "node --experimental-strip-types --test tests/tools.test.ts",
@@ -14,7 +14,6 @@
     "test:m4": "node --experimental-strip-types --test tests/agent.test.ts",
     "test:m5": "node --experimental-strip-types --test tests/mutating-tools.test.ts",
     "test:m11": "node --experimental-strip-types --test tests/multi-edit.test.ts",
-    "test:m12": "node --experimental-strip-types --test tests/list-models.test.ts",
     "test:m6": "node --experimental-strip-types --test tests/streaming.test.ts",
     "test:m7": "node --experimental-strip-types --test tests/gate.test.ts tests/orchestrator.test.ts",
     "test:m8": "node --experimental-strip-types --test tests/session.test.ts",

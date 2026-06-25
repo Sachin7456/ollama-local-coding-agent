@@ -105,25 +105,38 @@ function safeJsonObject(s: string): Record<string, unknown> {
   }
 }
 
+/**
+ * Normalize ONE wire tool-call entry to our ToolCall, or null if it has no usable name.
+ * Accepts the standard `{function:{name,arguments}}` AND the non-wrapped variants weak models
+ * emit (`{name|tool, arguments|parameters|params|args|input}`). Returning null for a nameless
+ * entry lets the agent's content-recovery still fire instead of being shadowed by an empty call.
+ */
+export function normalizeWireToolCall(tc: unknown): ToolCall | null {
+  const o = (tc ?? {}) as Record<string, unknown>;
+  const fn = (o.function ?? {}) as Record<string, unknown>;
+  const pick = (v: unknown): string => (typeof v === "string" && v.trim() ? v : "");
+  const name = pick(fn.name) || pick(o.name) || pick(o.tool);
+  if (!name) return null;
+  const rawArgs =
+    fn.arguments ?? fn.parameters ?? fn.args ?? fn.input ?? o.arguments ?? o.parameters ?? o.params ?? o.args ?? o.input;
+  const args =
+    typeof rawArgs === "string"
+      ? safeJsonObject(rawArgs)
+      : rawArgs && typeof rawArgs === "object" && !Array.isArray(rawArgs)
+        ? (rawArgs as Record<string, unknown>)
+        : {};
+  return { function: { name, arguments: args } };
+}
+
 /** Parse a native /api/chat response into our typed ChatResult. Pure function. */
 export function parseChatResponse(json: unknown): ChatResult {
   const j = (json ?? {}) as Record<string, unknown>;
   const msg = (j.message ?? {}) as Record<string, unknown>;
 
   const rawCalls = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
-  const toolCalls: ToolCall[] = rawCalls.map((tc): ToolCall => {
-    const fn = ((tc as Record<string, unknown>)?.function ?? {}) as Record<string, unknown>;
-    const args = fn.arguments;
-    return {
-      function: {
-        name: typeof fn.name === "string" ? fn.name : "",
-        arguments:
-          typeof args === "string"
-            ? safeJsonObject(args) // some builds / the /v1 path encode as a string
-            : (args && typeof args === "object" ? (args as Record<string, unknown>) : {}),
-      },
-    };
-  });
+  const toolCalls: ToolCall[] = rawCalls
+    .map(normalizeWireToolCall)
+    .filter((c): c is ToolCall => c !== null);
 
   const promptTokens = Number(j.prompt_eval_count ?? 0);
   const evalTokens = Number(j.eval_count ?? 0);
@@ -208,19 +221,8 @@ export class OllamaClient {
         }
         if (Array.isArray(msg.tool_calls)) {
           for (const tc of msg.tool_calls) {
-            const fn = ((tc as Record<string, unknown>)?.function ?? {}) as Record<string, unknown>;
-            const args = fn.arguments;
-            toolCalls.push({
-              function: {
-                name: typeof fn.name === "string" ? fn.name : "",
-                arguments:
-                  typeof args === "string"
-                    ? safeJsonObject(args)
-                    : args && typeof args === "object" && !Array.isArray(args)
-                      ? (args as Record<string, unknown>)
-                      : {},
-              },
-            });
+            const c = normalizeWireToolCall(tc);
+            if (c) toolCalls.push(c);
           }
         }
       }

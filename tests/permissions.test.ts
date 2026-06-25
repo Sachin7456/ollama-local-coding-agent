@@ -7,6 +7,7 @@ import {
   createDefaultPermissions,
   dangerousCommandRule,
   requestFromTool,
+  isReadOnlyBashCommand,
   DANGEROUS_COMMAND_PATTERNS,
   type PermissionRequest,
 } from "../src/permissions/permissions.ts";
@@ -61,15 +62,14 @@ test("dangerous commands are denied — even in bypass mode", () => {
   }
 });
 
-test("ordinary commands are NOT flagged dangerous (default => ask)", () => {
+test("ordinary non-readonly commands ask (default); safe read-only ones auto-allow", () => {
   const p = createDefaultPermissions("default");
-  assert.equal(p.decide(mut("bash", { command: "git status" })).decision, "ask");
-  assert.equal(p.decide(mut("bash", { command: "ls -la" })).decision, "ask");
-  // in bypass, the same safe command is allowed
-  assert.equal(
-    createDefaultPermissions("bypass").decide(mut("bash", { command: "ls -la" })).decision,
-    "allow",
-  );
+  // not on the read-only allowlist -> still ask (not dangerous, just not provably safe)
+  assert.equal(p.decide(mut("bash", { command: "npm test" })).decision, "ask");
+  assert.equal(p.decide(mut("bash", { command: "node build.js" })).decision, "ask");
+  // safe read-only commands now auto-allow (bash is the universal exploration tool)
+  assert.equal(p.decide(mut("bash", { command: "ls -la" })).decision, "allow");
+  assert.equal(p.decide(mut("bash", { command: "git status" })).decision, "allow");
 });
 
 test("the dangerous pattern list catches several known forms", () => {
@@ -80,6 +80,30 @@ test("the dangerous pattern list catches several known forms", () => {
   }
   assert.equal(rule.when?.({ command: "echo hello" }), false);
   assert.ok(DANGEROUS_COMMAND_PATTERNS.length >= 8);
+});
+
+test("the hardened deny floor catches more destructive forms (and spares safe variants)", () => {
+  const p = createDefaultPermissions("default");
+  const denied = [
+    "chmod -R 777 /srv",
+    "chmod -Rv 000 .",
+    "chown -R user /",
+    "chown -R user:grp /etc",
+    "wipefs /dev/sda",
+    "shred -u secret.key",
+    "truncate -s 0 /dev/sda",
+    "crontab -r",
+    "cipher /w:C:\\",
+    "diskpart",
+  ];
+  for (const command of denied) {
+    assert.equal(p.decide(mut("bash", { command })).decision, "deny", command);
+  }
+  // safe variants must NOT be denied
+  const rule = dangerousCommandRule();
+  for (const command of ["chmod -R 755 .", "chmod 644 a.txt", "chown -R user /home/u/app", "crontab -l", "shred.txt"]) {
+    assert.equal(rule.when?.({ command }), false, command);
+  }
 });
 
 // ---------------- explicit rules ----------------
@@ -130,4 +154,91 @@ test("setMode flips behavior at runtime", () => {
   p.setMode("acceptEdits");
   assert.equal(p.decide(mut("write_file")).decision, "allow");
   assert.equal(p.mode, "acceptEdits");
+});
+
+// ---------------- safe read-only bash auto-allow ----------------
+test("safe read-only bash commands auto-allow in default mode", () => {
+  const p = createDefaultPermissions("default");
+  for (const command of [
+    "ls -la",
+    "find . -name x.ts",
+    "ps aux",
+    "grep -r foo .",
+    "cat a.txt",
+    "git status",
+    "git log --oneline",
+    "du -sh .",
+    "pwd",
+    "timeout 5 ls",
+  ]) {
+    assert.equal(p.decide(mut("bash", { command })).decision, "allow", command);
+  }
+});
+
+test("unsafe / mutating bash still asks in default mode", () => {
+  const p = createDefaultPermissions("default");
+  for (const command of [
+    "rm file",
+    "npm install",
+    "node x.js",
+    "find . -delete",
+    "cat > f",
+    "a; b",
+    "ls | sh",
+    "env X=y ls",
+    "xargs ls",
+    "sudo ls",
+    "git push",
+    "git branch -D x",
+    "find *",
+  ]) {
+    assert.equal(p.decide(mut("bash", { command })).decision, "ask", command);
+  }
+});
+
+test("isReadOnlyBashCommand: allow matrix", () => {
+  for (const c of [
+    "ls",
+    "ls -la src",
+    "find . -name pkg",
+    "ps aux",
+    "grep -rn TODO src",
+    "cat package.json",
+    "git status",
+    "git diff",
+    "du -sh .",
+    "wc -l a.txt",
+    "nice ls",
+    "timeout 10 find . -type f",
+  ]) {
+    assert.equal(isReadOnlyBashCommand(c), true, c);
+  }
+});
+
+test("isReadOnlyBashCommand: reject matrix (operators, write-flags, non-allowlisted)", () => {
+  for (const c of [
+    "",
+    "rm file",
+    "node x.js",
+    "npm ci",
+    "sed -i s/a/b/ f",
+    "find . -delete",
+    "find . -exec rm {} ;",
+    "cat > f",
+    "cat a.txt > b",
+    "ls; rm -rf x",
+    "ls && rm x",
+    "grep x . | sh",
+    "echo $(rm x)",
+    "ls ~",
+    "find *",
+    "env X=y ls",
+    "xargs rm",
+    "sudo ls",
+    "git push",
+    "git branch -D feature",
+    "git commit -m x",
+  ]) {
+    assert.equal(isReadOnlyBashCommand(c), false, JSON.stringify(c));
+  }
 });

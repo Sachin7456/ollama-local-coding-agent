@@ -61,7 +61,7 @@ export interface RunAgentOptions {
   signal?: AbortSignal;
 }
 
-export type StopReason = "completed" | "max_turns" | "circuit_breaker" | "aborted";
+export type StopReason = "completed" | "max_turns" | "circuit_breaker" | "aborted" | "loop";
 
 export interface AgentResult {
   text: string;
@@ -75,6 +75,9 @@ const MAX_CONSECUTIVE_DENIALS = 3;
 const MAX_CONSECUTIVE_NUDGES = 1; // one reminder when a turn does nothing; resets on tool-call progress
 const NO_ACTION_NUDGE =
   "You did not call a tool or give an answer. Either call a tool now to do the work, or give your final answer.";
+const MAX_CONSECUTIVE_REPEATS = 2; // the 3rd identical tool-call turn in a row = a stuck loop -> stop
+const LOOP_WARNING =
+  "You've repeated the same action without making progress. Try a different approach, or give your final answer.";
 
 // How a resolved tool call moves the denial circuit-breaker counter.
 type DenialEffect = "reset" | "increment" | "none";
@@ -109,6 +112,8 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentResult> {
 
   let consecutiveDenials = 0;
   let consecutiveNudges = 0;
+  let consecutiveRepeats = 0;
+  let lastToolFingerprint = "";
 
   for (let turn = 1; turn <= maxTurns; turn++) {
     // Stop before spending a generation if the run was aborted (Ctrl+C / exit).
@@ -170,6 +175,27 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentResult> {
       return { text: assistantText, messages, turns: turn, stopReason: "completed" };
     }
     consecutiveNudges = 0; // a tool call = progress — allow future nudges again
+
+    // Loop guard: a model stuck repeating the SAME tool call makes no progress. Fingerprint this
+    // turn's tool calls; on the 3rd identical turn in a row, stop BEFORE running it again.
+    const toolFingerprint = toolCalls
+      .map((c) => `${c.function.name}:${JSON.stringify(c.function.arguments ?? {})}`)
+      .join("|");
+    if (toolFingerprint && toolFingerprint === lastToolFingerprint) {
+      consecutiveRepeats++;
+    } else {
+      consecutiveRepeats = 0;
+      lastToolFingerprint = toolFingerprint;
+    }
+    if (consecutiveRepeats >= MAX_CONSECUTIVE_REPEATS) {
+      emit({ type: "done", reason: "loop: repeated the same tool call without progress", turns: turn });
+      return {
+        text: "Stopped: the model repeated the same action without making progress.",
+        messages,
+        turns: turn,
+        stopReason: "loop",
+      };
+    }
 
     // Resolve a single tool call's decision WITHOUT dispatching it yet. Interactive
     // onAsk is awaited here (phase A) so prompts never race. Does not mutate
@@ -237,6 +263,11 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentResult> {
         record({ role: "tool", content: r.content, tool_name: r.name });
         emit({ type: "tool_result", tool: r.name, decision: r.decision, content: r.content, turn });
       }
+    }
+
+    // On the 2nd identical tool-call turn, warn the model once so it can break out before the hard stop.
+    if (consecutiveRepeats === 1) {
+      record({ role: "user", content: LOOP_WARNING });
     }
 
     // Circuit breaker: a confused model retrying blocked actions forever.

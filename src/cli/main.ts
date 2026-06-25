@@ -20,18 +20,17 @@ import { Semaphore } from "../orchestration/gate.ts";
 import { runOrchestrator } from "../orchestration/orchestrator.ts";
 import { Session, listSessions } from "../state/session.ts";
 import { rememberTool, recallTool, buildMemoryBlock } from "../state/memory.ts";
-import { makeListModelsTool } from "../model/listModelsTool.ts";
 import type { ChatMessage } from "../model/ollamaClient.ts";
 
 const SYSTEM_PROMPT = `You are a coding assistant working in a local project directory.
-You have tools: read_file, grep, write_file, edit_file, multi_edit, bash, list_models.
+You have tools: read_file, grep, write_file, edit_file, multi_edit, bash.
 
 How to work:
 - To inspect or change anything, CALL a tool — reading, searching, and editing happen only through tools.
+- To understand a project or directory, use bash to list and find files (\`ls\`, \`find\`), then read_file the key ones (README, package.json, files under src/), and grep to search the code.
 - Always read_file a file before you edit_file/multi_edit it; copy the text to change verbatim.
 - For several edits to one file in one step, prefer multi_edit (it applies atomically).
-- Use bash for shell commands — builds, tests, git, and environment checks like \`ollama list\` or \`node -v\` — never to read or edit files.
-- To see which models are installed locally, call list_models (don't guess).`;
+- Use bash freely for shell + system tasks: list/find files (\`ls\`, \`find\`), search (\`grep -r\`), and inspect the machine (\`ps\`, \`du\`, \`git status\`, \`node -v\`). Safe read-only commands run without asking. Use read_file/edit_file/grep for the CONTENTS of specific files (they track reads so edits stay safe); use bash for everything else.`;
 
 // Kept SEPARATE so it is always the LAST thing the model reads (recency matters for small models),
 // even when a memory block is inserted before it.
@@ -48,6 +47,7 @@ interface CliArgs {
   multi: boolean;
   resume?: string;
   listSessions: boolean;
+  maxTurns?: number;
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -57,6 +57,7 @@ function parseArgs(argv: string[]): CliArgs {
   let multi = false;
   let resume: string | undefined;
   let listSessions = false;
+  let maxTurns: number | undefined;
   const rest: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -64,11 +65,14 @@ function parseArgs(argv: string[]): CliArgs {
     else if (a === "--worker") worker = argv[++i];
     else if (a === "--mode") mode = argv[++i] as PermissionMode;
     else if (a === "--multi") multi = true;
-    else if (a === "--resume" || a === "-r") resume = argv[++i];
+    else if (a === "--max-turns") {
+      const n = Number(argv[++i]);
+      if (Number.isFinite(n) && n > 0) maxTurns = Math.trunc(n);
+    } else if (a === "--resume" || a === "-r") resume = argv[++i];
     else if (a === "--list-sessions") listSessions = true;
     else rest.push(a);
   }
-  return { model, worker, task: rest.join(" ").trim() || undefined, mode, multi, resume, listSessions };
+  return { model, worker, task: rest.join(" ").trim() || undefined, mode, multi, resume, listSessions, maxTurns };
 }
 
 function printEvent(e: AgentEvent): void {
@@ -142,8 +146,7 @@ async function main(): Promise<void> {
   const client = new OllamaClient();
   const registry = createFullRegistry()
     .register(rememberTool)
-    .register(recallTool)
-    .register(makeListModelsTool(client));
+    .register(recallTool);
   const permissions = createDefaultPermissions(args.mode);
   const ctx: ToolContext = { cwd: process.cwd(), readState: new ReadState() };
   let activeModel = model.name;
@@ -224,7 +227,7 @@ async function main(): Promise<void> {
               maxWorkerTurns: 10,
               signal: ac.signal,
             },
-            maxTurns: 12,
+            maxTurns: args.maxTurns ?? 25,
             priorMessages,
             onMessage,
             compaction,
@@ -241,7 +244,7 @@ async function main(): Promise<void> {
             stream: true,
             onToken: (c) => process.stdout.write(c),
             onEvent: printEventStreaming,
-            maxTurns: 12,
+            maxTurns: args.maxTurns ?? 25,
             priorMessages,
             onMessage,
             compaction,

@@ -11,6 +11,9 @@ import {
   ToolRegistry,
   readFileTool,
   grepTool,
+  findFilesTool,
+  patternToRegExp,
+  FIND_FILES_MAX_RESULTS,
   type ToolContext,
 } from "../src/tools/tools.ts";
 
@@ -82,17 +85,18 @@ test("grep returns a no-match message and an invalid-regex error", async () => {
 });
 
 // ---------------- registry ----------------
-test("default registry exposes read_file + grep, both read-only", () => {
+test("default registry exposes read_file + grep + find_files, all read-only", () => {
   const reg = createDefaultRegistry();
-  assert.ok(reg.has("read_file") && reg.has("grep"));
+  assert.ok(reg.has("read_file") && reg.has("grep") && reg.has("find_files"));
   assert.equal(reg.get("read_file")?.readOnly, true);
   assert.equal(reg.get("grep")?.readOnly, true);
+  assert.equal(reg.get("find_files")?.readOnly, true);
 });
 
 test("toToolDefs produces wire-format schemas and can filter by name", () => {
   const reg = createDefaultRegistry();
   const all = reg.toToolDefs();
-  assert.equal(all.length, 2);
+  assert.equal(all.length, 3);
   for (const d of all) {
     assert.equal(d.type, "function");
     assert.ok(d.function.name.length > 0);
@@ -108,6 +112,74 @@ test("registry rejects duplicates and dispatches unknown tools as errors", async
   assert.throws(() => reg.register(readFileTool), /already registered/);
   const out = await reg.dispatch("does_not_exist", {}, ctx);
   assert.match(out, /unknown tool/);
+});
+
+test("read_file on a directory returns a guiding error (use bash ls)", async () => {
+  assert.match(await readFileTool.execute({ path: "sub" }, ctx), /is a directory — use bash/);
+});
+
+// ---------------- find_files ----------------
+test("find_files metadata: read-only, pattern required", () => {
+  assert.equal(findFilesTool.name, "find_files");
+  assert.equal(findFilesTool.readOnly, true);
+  const params = findFilesTool.parameters as { required?: string[] };
+  assert.ok((params.required ?? []).includes("pattern"));
+});
+
+test("find_files: *.txt is top-level only; **/*.ts matches nested", async () => {
+  const top = await findFilesTool.execute({ pattern: "*.txt" }, ctx);
+  assert.match(top, /^a\.txt$/m);
+  assert.match(top, /^empty\.txt$/m);
+  assert.doesNotMatch(top, /b\.ts/); // * does not cross a directory boundary
+  assert.match(await findFilesTool.execute({ pattern: "**/*.ts" }, ctx), /sub\/b\.ts/);
+});
+
+test("find_files: directory-prefix pattern + path param", async () => {
+  assert.match(await findFilesTool.execute({ pattern: "sub/**" }, ctx), /sub\/b\.ts/);
+  assert.match(await findFilesTool.execute({ pattern: "*.ts", path: "sub" }, ctx), /^b\.ts$/m);
+});
+
+test("find_files: no match + skips node_modules/hidden", async () => {
+  assert.match(await findFilesTool.execute({ pattern: "*.md" }, ctx), /No files match/);
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "qh-ff-"));
+  const c: ToolContext = { cwd: dir };
+  await fs.writeFile(path.join(dir, "keep.js"), "x");
+  await fs.mkdir(path.join(dir, "node_modules"));
+  await fs.writeFile(path.join(dir, "node_modules", "junk.js"), "x");
+  await fs.writeFile(path.join(dir, ".secret.js"), "x");
+  try {
+    const out = await findFilesTool.execute({ pattern: "**/*.js" }, c);
+    assert.match(out, /keep\.js/);
+    assert.doesNotMatch(out, /junk\.js/);
+    assert.doesNotMatch(out, /\.secret/);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("find_files: caps the listing and notes truncation", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "qh-ff-cap-"));
+  for (let i = 0; i < FIND_FILES_MAX_RESULTS + 5; i++) await fs.writeFile(path.join(dir, `f${i}.log`), "x");
+  try {
+    const out = await findFilesTool.execute({ pattern: "*.log" }, { cwd: dir });
+    assert.match(out, /more; showing the first 100/);
+    assert.equal(out.split("\n").filter((l) => l.endsWith(".log")).length, FIND_FILES_MAX_RESULTS);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("patternToRegExp: segment-aware glob → regex (no extglob)", () => {
+  assert.ok(patternToRegExp("*.ts").test("a.ts"));
+  assert.ok(!patternToRegExp("*.ts").test("sub/a.ts")); // * stays within one segment
+  assert.ok(patternToRegExp("**/*.ts").test("sub/a.ts"));
+  assert.ok(patternToRegExp("**/*.ts").test("a.ts"));
+  assert.ok(patternToRegExp("src/**").test("src/x/y.ts"));
+  assert.ok(patternToRegExp("a?c.txt").test("abc.txt"));
+  assert.ok(!patternToRegExp("a?c.txt").test("a/c.txt")); // ? is not a slash
+  assert.ok(patternToRegExp("{a,b}.txt").test("b.txt"));
+  assert.ok(!patternToRegExp("{a,b}.txt").test("c.txt"));
+  assert.ok(patternToRegExp("[ab].txt").test("a.txt"));
 });
 
 test("registry.dispatch runs a real tool end-to-end", async () => {

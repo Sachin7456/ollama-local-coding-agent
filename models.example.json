@@ -1,21 +1,46 @@
 {
   "//": "Copy to models.json and set QWEN_HARNESS_MODEL_SOURCE=file to use your own models. Each entry mirrors the built-in ModelConfig shape.",
   "models": {
-    "qwen2.5-coder:7b": {
-      "name": "qwen2.5-coder:7b",
-      "role": "worker",
-      "numCtx": 8192,
-      "keepAlive": "5m",
-      "sampling": { "temperature": 0.1, "top_p": 0.9, "top_k": 20, "repeat_penalty": 1.05 },
-      "approxSizeGB": 4.7
-    },
     "your-model:tag": {
       "name": "your-model:tag",
       "role": "general",
       "numCtx": 8192,
       "keepAlive": "5m",
-      "sampling": { "temperature": 0.1, "top_p": 0.9, "top_k": 20, "repeat_penalty": 1.05 },
+      "sampling": { "temperature": 0.1, "top_p": 0.9, "top_k": 20, "repeat_penalty": 1.1 },
       "approxSizeGB": 5
-    }
+    },
+    "qwen3:0.6b": {
+      "name": "qwen3:0.6b",
+      "role": "worker",
+      "numCtx": 8192,
+      "keepAlive": "5m",
+      "sampling": { "temperature": 0.1, "top_p": 0.9, "top_k": 20, "repeat_penalty": 1.1 },
+      "approxSizeGB": 1
+    },
+    "qwen2.5:3b-instruct": {
+    "name": "qwen2.5:3b-instruct",
+    "role": "worker",
+    "numCtx": 8192,
+    "keepAlive": "5m",
+    "sampling": { "temperature": 0.1, "top_p": 0.9, "top_k": 20, "repeat_penalty": 1.1 },
+    "approxSizeGB": 2.0
+  },
+
+  "qwen2.5:7b-instruct": {
+    "name": "qwen2.5:7b-instruct",
+    "role": "worker",
+    "numCtx": 8192,
+    "keepAlive": "5m",
+    "sampling": { "temperature": 0.1, "top_p": 0.9, "top_k": 20, "repeat_penalty": 1.1 },
+    "approxSizeGB": 4.7
+  },
+  "qwen2.5-coder:7b": {
+    "name": "qwen2.5-coder:7b",
+    "role": "worker",
+    "numCtx": 8192,
+    "keepAlive": "5m",
+    "sampling": { "temperature": 0.1, "top_p": 0.9, "top_k": 20, "repeat_penalty": 1.1 },
+    "approxSizeGB": 4.7
+  }
   }
 }

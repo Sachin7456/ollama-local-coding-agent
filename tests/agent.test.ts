@@ -197,7 +197,8 @@ test("unknown tool returns an error listing available tools", async () => {
 
 // ---------------- loop guards ----------------
 test("maxTurns stops a model that never stops calling tools", async () => {
-  const m = await scriptedModel(() => ({ tool_calls: [toolCall("read_file", { path: "a.txt" })] }));
+  // vary args per turn so the loop guard doesn't trip — this test is about maxTurns only.
+  const m = await scriptedModel((i) => ({ tool_calls: [toolCall("read_file", { path: `a${i}.txt` })] }));
   try {
     const res = await runAgent({
       client: m.client,
@@ -214,8 +215,58 @@ test("maxTurns stops a model that never stops calling tools", async () => {
   }
 });
 
+test("loop guard stops a model repeating the SAME tool call (before maxTurns)", async () => {
+  const m = await scriptedModel(() => ({ tool_calls: [toolCall("read_file", { path: "a.txt" })] }));
+  try {
+    const res = await runAgent({
+      client: m.client,
+      registry: createDefaultRegistry(),
+      permissions: createDefaultPermissions("default"),
+      ctx: { cwd: tmp },
+      userMessage: "read it over and over",
+      maxTurns: 12,
+    });
+    assert.equal(res.stopReason, "loop"); // stopped by the loop guard, NOT maxTurns
+    assert.equal(res.turns, 3); // the 3rd identical turn
+    assert.equal(m.callCount(), 3);
+    assert.ok(
+      res.messages.some((x) => x.role === "user" && /repeated the same action/.test(x.content ?? "")),
+      "a loop warning was injected on the 2nd identical turn",
+    );
+  } finally {
+    await m.close();
+  }
+});
+
+test("loop guard does NOT trip on a normal multi-step sequence", async () => {
+  const m = await scriptedModel((i) =>
+    i === 0
+      ? { tool_calls: [toolCall("read_file", { path: "a.txt" })] }
+      : i === 1
+        ? { tool_calls: [toolCall("read_file", { path: "p1.txt" })] }
+        : { content: "All done." },
+  );
+  try {
+    await fs.writeFile(path.join(tmp, "p1.txt"), "second\n");
+    const res = await runAgent({
+      client: m.client,
+      registry: createDefaultRegistry(),
+      permissions: createDefaultPermissions("default"),
+      ctx: { cwd: tmp },
+      userMessage: "read two files then summarize",
+      maxTurns: 12,
+    });
+    assert.equal(res.stopReason, "completed");
+    assert.match(res.text, /All done/);
+    assert.ok(!res.messages.some((x) => x.role === "user" && /repeated the same action/.test(x.content ?? "")));
+  } finally {
+    await m.close();
+  }
+});
+
 test("circuit breaker stops after repeated denied (dangerous) calls", async () => {
-  const m = await scriptedModel(() => ({ tool_calls: [toolCall("bash", { command: "rm -rf /" })] }));
+  // vary the command per turn so the loop guard doesn't trip — this tests the denial breaker.
+  const m = await scriptedModel((i) => ({ tool_calls: [toolCall("bash", { command: `rm -rf /tmp/x${i}` })] }));
   try {
     const registry = createDefaultRegistry().register(bashTool);
     const res = await runAgent({

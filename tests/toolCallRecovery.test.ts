@@ -66,3 +66,46 @@ test("strips a <think> block, then recovers the embedded tool call", () => {
   assert.equal(r.toolCalls[0].function.name, "read_file");
   assert.equal(r.cleanedText, "");
 });
+
+// ---------------- function-call syntax (read_file({...}) / grep(pattern="x")) + input key ----------------
+test("recovers function-call syntax with a JSON object arg", () => {
+  const r = recoverToolCallsFromContent('read_file({"path": "x.txt"})', known);
+  assert.equal(r.toolCalls.length, 1);
+  assert.equal(r.toolCalls[0].function.name, "read_file");
+  assert.deepEqual(r.toolCalls[0].function.arguments, { path: "x.txt" });
+  assert.equal(r.cleanedText, "");
+});
+
+test("recovers function-call syntax with kwargs (string + number types)", () => {
+  const r = recoverToolCallsFromContent('bash(command="ls -la", timeout=5000)', known);
+  assert.equal(r.toolCalls.length, 1);
+  assert.equal(r.toolCalls[0].function.name, "bash");
+  assert.deepEqual(r.toolCalls[0].function.arguments, { command: "ls -la", timeout: 5000 });
+});
+
+test("recovers the `input` args key", () => {
+  const r = recoverToolCallsFromContent('{"name":"read_file","input":{"path":"x"}}', known);
+  assert.equal(r.toolCalls.length, 1);
+  assert.deepEqual(r.toolCalls[0].function.arguments, { path: "x" });
+});
+
+test("does NOT recover prose that merely mentions a tool name", () => {
+  const r = recoverToolCallsFromContent("You should read_file the config to see what it does.", known);
+  assert.equal(r.toolCalls.length, 0);
+  assert.match(r.cleanedText, /You should/);
+});
+
+test("does NOT recover an empty-arg call or an unknown tool", () => {
+  assert.equal(recoverToolCallsFromContent("Use grep() to search.", known).toolCalls.length, 0);
+  assert.equal(recoverToolCallsFromContent('frobnicate({"x":1})', known).toolCalls.length, 0);
+});
+
+test("does NOT recover a tool-call example buried in a long answer (dominance guard)", () => {
+  const long =
+    "Here is a detailed explanation of how the project works and what it is for. " +
+    'For example you could call read_file({"path":"a.txt"}) to read a file. ' +
+    "But the project mainly does X, Y, and Z across many modules and files, and so on and so forth.";
+  const r = recoverToolCallsFromContent(long, known);
+  assert.equal(r.toolCalls.length, 0);
+  assert.match(r.cleanedText, /detailed explanation/);
+});

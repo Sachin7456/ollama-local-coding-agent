@@ -10,7 +10,8 @@
 //   2. bypass mode  -> allow
 //   3. allow rules  -> allow
 //   4. ask rules    -> ask
-//   5. defaults:    read-only -> allow; plan -> deny; acceptEdits -> allow; else ask
+//   5. safe read-only bash command -> allow (bash is the universal exploration tool);
+//      then: read-only tool -> allow; plan -> deny; acceptEdits -> allow; else ask
 
 export type PermissionDecision = "allow" | "ask" | "deny";
 export type PermissionMode = "default" | "acceptEdits" | "plan" | "bypass";
@@ -66,6 +67,14 @@ export const DANGEROUS_COMMAND_PATTERNS: RegExp[] = [
   /\bformat\s+[a-zA-Z]:/i, // Windows: format C:
   /Remove-Item\b[^\n]*-Recurse\b[^\n]*-Force\b/i, // PowerShell recursive force delete
   /\bdel\b\s+\/[sq]\b/i, // Windows del /s /q
+  /\bchmod\s+(-[a-z]*\s+)*-R[a-z]*\s+[^\n]*\b(777|000)\b/i, // chmod -R 777/000 (world-writable / lockout)
+  /\bchown\s+(-[a-z]*\s+)*-R[a-z]*\s+[^\n]*\s(\/(\s|$)|\/etc\b|~(\/|\s|$))/i, // chown -R on / /etc ~
+  /\bwipefs\b\s+\S/i, // wipe filesystem signatures
+  /\bshred\s+-/i, // destructive overwrite (shred with flags)
+  /\btruncate\b[^\n]*\s\/dev\//i, // truncate a device
+  /\bcrontab\s+-r\b/i, // delete all cron jobs (no recovery)
+  /\bcipher\s+\/w:/i, // Windows: wipe free disk space
+  /\bdiskpart\b/i, // Windows: disk-partitioning tool
 ];
 
 /** A "*" deny rule that scans common command args for dangerous patterns. */
@@ -79,6 +88,87 @@ export function dangerousCommandRule(): PermissionRule {
       return DANGEROUS_COMMAND_PATTERNS.some((re) => re.test(cmd));
     },
   };
+}
+
+// ---- safe read-only bash classification --------------------------------------------------
+// So bash can be the universal exploration/system tool (find a file, list a dir, "which process
+// uses the most CPU") WITHOUT a prompt for every `ls`/`find`/`ps`. This auto-allows ONLY commands
+// we are confident are read-only; it is fail-safe (anything uncertain returns false → "ask") and
+// runs AFTER the dangerous-command deny floor. It is a gate, not a sandbox. NOTE: this allowlist
+// is a security surface — adding a command needs review.
+
+// Any one of these → reject (operators, substitution, expansion, globbing, quoting, separators).
+// Broad on purpose: "reject, don't escape" (escaping shell metacharacters is error-prone).
+const SHELL_METACHARS = /[|&;<>$`(){}\[\]*?~!\\'"\n\r]/;
+
+const READONLY_COMMANDS = new Set([
+  "ls", "dir", "pwd", "cat", "head", "tail", "wc", "find", "grep", "rg", "ps", "du", "df",
+  "stat", "file", "tree", "echo", "which", "where", "date", "whoami", "hostname", "uname",
+]);
+
+// find actions that write or execute → never auto-allow.
+const FIND_WRITE_FLAGS = new Set([
+  "-delete", "-exec", "-execdir", "-ok", "-okdir", "-fls", "-fprint", "-fprint0", "-fprintf",
+]);
+
+// git subcommands that cannot mutate regardless of their (metachar-free) args.
+const GIT_ALWAYS_SAFE = new Set([
+  "status", "log", "diff", "show", "rev-parse", "ls-files", "blame", "describe", "shortlog",
+]);
+
+// "dual" git subcommands: safe ONLY in their listing form (every extra arg a known read flag).
+const GIT_LIST_FLAGS: Record<string, Set<string>> = {
+  branch: new Set(["-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose", "--list", "--show-current", "--merged", "--no-merged"]),
+  tag: new Set(["-l", "--list", "-n"]),
+  remote: new Set(["-v", "--verbose"]),
+};
+
+// Strip safe leading wrappers (time/nice/nohup/timeout/stdbuf). NOT env/xargs/sudo/npx/docker.
+function stripBashWrappers(tokens: string[]): string[] {
+  let t = tokens;
+  for (let guard = 0; guard < 4 && t.length > 0; guard++) {
+    const head = t[0].toLowerCase();
+    if (head === "time") t = t.slice(t[1] === "-p" ? 2 : 1);
+    else if (head === "nohup") t = t.slice(1);
+    else if (head === "nice") t = t[1] === "-n" ? t.slice(3) : t.slice(1);
+    else if (head === "timeout") t = t.slice(2); // consume the duration token
+    else if (head === "stdbuf") {
+      let i = 1;
+      while (i < t.length && t[i].startsWith("-")) i++;
+      t = t.slice(i);
+    } else break;
+  }
+  return t;
+}
+
+function isReadOnlyGit(rest: string[]): boolean {
+  const sub = rest[0]?.toLowerCase();
+  if (!sub) return false;
+  if (GIT_ALWAYS_SAFE.has(sub)) return true;
+  if (sub === "branch" || sub === "tag" || sub === "remote") {
+    return rest.slice(1).every((a) => a.startsWith("-") && GIT_LIST_FLAGS[sub].has(a));
+  }
+  if (sub === "config") {
+    const a = rest[1]?.toLowerCase();
+    return a === "--get" || a === "--get-all" || a === "--get-regexp" || a === "--list" || a === "-l";
+  }
+  return false;
+}
+
+/**
+ * True only for bash commands we are confident are read-only (safe to run without asking).
+ * Conservative + fail-safe: rejects all shell metacharacters and anything not on the allowlist.
+ */
+export function isReadOnlyBashCommand(command: string): boolean {
+  const cmd = command.trim();
+  if (!cmd) return false;
+  if (SHELL_METACHARS.test(cmd)) return false;
+  const tokens = stripBashWrappers(cmd.split(/\s+/));
+  const head = tokens[0]?.toLowerCase();
+  if (!head) return false;
+  if (head === "git") return isReadOnlyGit(tokens.slice(1));
+  if (head === "find") return !tokens.some((t) => FIND_WRITE_FLAGS.has(t.toLowerCase()));
+  return READONLY_COMMANDS.has(head);
 }
 
 export class PermissionEngine {
@@ -119,6 +209,16 @@ export class PermissionEngine {
       }
     }
     // 5. defaults by read-only + mode.
+    // A safe read-only shell command behaves like a read-only tool — bash is the universal
+    // exploration tool, so `ls`/`find`/`ps`/etc. run without asking. Stays after the deny floor
+    // (1) and explicit rules (3-4), so dangerous commands are still denied and user rules win.
+    if (
+      req.toolName === "bash" &&
+      !req.readOnly &&
+      isReadOnlyBashCommand(typeof req.args.command === "string" ? req.args.command : "")
+    ) {
+      return { decision: "allow", reason: "read-only shell command" };
+    }
     if (req.readOnly) return { decision: "allow", reason: "read-only tool" };
     if (this.cfg.mode === "plan") return { decision: "deny", reason: "plan mode is read-only" };
     if (this.cfg.mode === "acceptEdits") {
