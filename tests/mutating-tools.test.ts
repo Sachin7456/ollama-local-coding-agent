@@ -12,6 +12,8 @@ import {
   bashTool,
   readFileTool,
   createFullRegistry,
+  resolveInside,
+  sandboxPrefix,
   ReadState,
   type ToolContext,
 } from "../src/tools/tools.ts";
@@ -38,6 +40,68 @@ test("write_file overwrites existing content", async () => {
   await writeFileTool.execute({ path: "o.txt", content: "one" }, ctxWith());
   await writeFileTool.execute({ path: "o.txt", content: "two" }, ctxWith());
   assert.equal(await fs.readFile(path.join(tmp, "o.txt"), "utf8"), "two");
+});
+
+// ---------------- B4: write_file read-before-overwrite (data-loss guard) ----------------
+test("write_file refuses to overwrite an existing UNREAD file (B4)", async () => {
+  const rs = new ReadState();
+  await fs.writeFile(path.join(tmp, "exist.txt"), "original");
+  const out = await writeFileTool.execute({ path: "exist.txt", content: "clobber" }, ctxWith(rs));
+  assert.match(out, /already exists/i);
+  assert.equal(await fs.readFile(path.join(tmp, "exist.txt"), "utf8"), "original"); // unchanged
+});
+
+test("write_file still creates a NEW file with readState present (B4)", async () => {
+  const rs = new ReadState();
+  assert.match(await writeFileTool.execute({ path: "brand-new.txt", content: "hi" }, ctxWith(rs)), /Wrote 2 bytes/);
+});
+
+test("write_file allows overwrite AFTER a read (B4)", async () => {
+  const rs = new ReadState();
+  await fs.writeFile(path.join(tmp, "rw.txt"), "old");
+  await readFileTool.execute({ path: "rw.txt" }, ctxWith(rs)); // marks read
+  assert.match(await writeFileTool.execute({ path: "rw.txt", content: "new" }, ctxWith(rs)), /Wrote 3 bytes/);
+  assert.equal(await fs.readFile(path.join(tmp, "rw.txt"), "utf8"), "new");
+});
+
+// ---------------- B1: workspace path confinement ----------------
+test("resolveInside confines paths to the workspace (B1)", () => {
+  assert.notEqual(resolveInside(tmp, "a/b.txt"), null); // inside → ok
+  assert.notEqual(resolveInside(tmp, "."), null); // workspace root itself → ok
+  assert.equal(resolveInside(tmp, "../evil.txt"), null); // parent escape
+  assert.equal(resolveInside(tmp, path.join(path.dirname(tmp), "evil.txt")), null); // absolute outside
+});
+
+test("file tools reject reads/writes outside the workspace (B1)", async () => {
+  const outside = path.join(path.dirname(tmp), `qh-outside-${path.basename(tmp)}.txt`);
+  await fs.writeFile(outside, "secret");
+  try {
+    assert.match(await readFileTool.execute({ path: "../" + path.basename(outside) }, ctxWith()), /outside the workspace/);
+    assert.match(await readFileTool.execute({ path: outside }, ctxWith()), /outside the workspace/); // absolute
+    assert.match(await writeFileTool.execute({ path: "../escape.txt", content: "x" }, ctxWith()), /outside the workspace/);
+  } finally {
+    await fs.rm(outside, { force: true });
+  }
+});
+
+test("path confinement defeats a symlink pointing outside the workspace (B1)", async () => {
+  const outside = path.join(path.dirname(tmp), `qh-symtarget-${path.basename(tmp)}`);
+  await fs.mkdir(outside, { recursive: true });
+  await fs.writeFile(path.join(outside, "s.txt"), "secret");
+  let linked = false;
+  try {
+    await fs.symlink(outside, path.join(tmp, "link"), "junction"); // junction works without privilege on Windows
+    linked = true;
+  } catch {
+    /* symlink creation may require privilege — skip the assertion in that case */
+  }
+  try {
+    if (linked) {
+      assert.match(await readFileTool.execute({ path: "link/s.txt" }, ctxWith()), /outside the workspace/);
+    }
+  } finally {
+    await fs.rm(outside, { recursive: true, force: true });
+  }
 });
 
 // ---------------- edit_file ----------------
@@ -102,6 +166,16 @@ test("bash runs a harmless command and returns output + exit code", async () => 
   const out = await bashTool.execute({ command: "echo hello_harness" }, ctxWith());
   assert.match(out, /exit code: 0/);
   assert.match(out, /hello_harness/);
+});
+
+test("sandboxPrefix parses QWEN_HARNESS_SANDBOX — empty by default (Layer 3 containment hook)", () => {
+  const saved = process.env.QWEN_HARNESS_SANDBOX;
+  delete process.env.QWEN_HARNESS_SANDBOX;
+  assert.deepEqual(sandboxPrefix(), []); // unset → no wrapping (default behavior unchanged)
+  process.env.QWEN_HARNESS_SANDBOX = "bwrap --unshare-net --bind . .";
+  assert.deepEqual(sandboxPrefix(), ["bwrap", "--unshare-net", "--bind", ".", "."]);
+  if (saved === undefined) delete process.env.QWEN_HARNESS_SANDBOX;
+  else process.env.QWEN_HARNESS_SANDBOX = saved;
 });
 
 // ---------------- edit_file whitespace-tolerant fallback ----------------

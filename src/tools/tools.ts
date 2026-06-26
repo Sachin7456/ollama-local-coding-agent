@@ -9,6 +9,7 @@
 // dispatches a model tool-call to the matching execute().
 
 import fs from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import path from "node:path";
 import { exec, execFile } from "node:child_process";
 import type { ToolDef } from "../model/ollamaClient.ts";
@@ -36,6 +37,40 @@ export interface ToolContext {
   cwd: string;
   /** Optional read-tracking for the read-before-edit invariant (CLI supplies one). */
   readState?: ReadState;
+}
+
+/**
+ * Resolve `rel` against the workspace `cwd` and CONFINE it to the workspace. Returns the absolute
+ * path if it stays inside `cwd` after symlink resolution, or null if it escapes (`..`, an absolute
+ * path outside, or a symlink that points out). Symlink-proof: the longest existing prefix is
+ * canonicalized via realpathSync; a not-yet-existing leaf is allowed only if its real parent is inside.
+ */
+export function resolveInside(cwd: string, rel: string): string | null {
+  let root: string;
+  try {
+    root = realpathSync(cwd);
+  } catch {
+    root = path.resolve(cwd);
+  }
+  const abs = path.resolve(root, rel);
+  // Canonicalize the longest existing prefix (defeats symlink escapes); keep the missing tail.
+  let dir = abs;
+  const tail: string[] = [];
+  for (;;) {
+    try {
+      dir = realpathSync(dir);
+      break;
+    } catch {
+      const parent = path.dirname(dir);
+      if (parent === dir) break; // reached the filesystem root with nothing existing
+      tail.unshift(path.basename(dir));
+      dir = parent;
+    }
+  }
+  const real = tail.length ? path.join(dir, ...tail) : dir;
+  const r = path.relative(root, real);
+  const escapes = r === ".." || r.startsWith(".." + path.sep) || path.isAbsolute(r);
+  return escapes ? null : real;
 }
 
 export interface Tool {
@@ -157,7 +192,8 @@ export const readFileTool: Tool = {
   async execute(args, ctx) {
     const rel = asString(args.path);
     if (!rel) return "Error: 'path' is required.";
-    const abs = path.resolve(ctx.cwd, rel);
+    const abs = resolveInside(ctx.cwd, rel);
+    if (abs === null) return `Error: ${rel} is outside the workspace.`;
     let raw: string;
     try {
       raw = await fs.readFile(abs, "utf8");
@@ -247,7 +283,8 @@ export const grepTool: Tool = {
     } catch (err) {
       return `Error: invalid regular expression: ${(err as Error).message}`;
     }
-    const searchRoot = path.resolve(ctx.cwd, asString(args.path, "."));
+    const searchRoot = resolveInside(ctx.cwd, asString(args.path, "."));
+    if (searchRoot === null) return `Error: ${asString(args.path, ".")} is outside the workspace.`;
     const cap = Math.max(1, asInt(args.maxResults) ?? GREP_MAX_RESULTS);
 
     let rootStat: import("node:fs").Stats;
@@ -334,7 +371,19 @@ export const writeFileTool: Tool = {
     const rel = asString(args.path);
     if (!rel) return "Error: 'path' is required.";
     const content = asString(args.content);
-    const abs = path.resolve(ctx.cwd, rel);
+    const abs = resolveInside(ctx.cwd, rel);
+    if (abs === null) return `Error: ${rel} is outside the workspace.`;
+    // read-before-overwrite: don't silently clobber an existing file the model hasn't read (data-loss guard).
+    if (ctx.readState) {
+      try {
+        await fs.stat(abs);
+        if (!ctx.readState.hasRead(abs)) {
+          return `Error: ${rel} already exists — read_file it first, or use edit_file for surgical changes.`;
+        }
+      } catch {
+        /* ENOENT → new file, ok to create */
+      }
+    }
     try {
       await fs.mkdir(path.dirname(abs), { recursive: true });
       await fs.writeFile(abs, content, "utf8");
@@ -416,7 +465,8 @@ export const editFileTool: Tool = {
     if (!rel) return "Error: 'path' is required.";
     if (oldStr.length === 0) return "Error: 'old_string' must be non-empty. To create a file use write_file.";
     if (oldStr === newStr) return "Error: 'old_string' and 'new_string' are identical; nothing to change.";
-    const abs = path.resolve(ctx.cwd, rel);
+    const abs = resolveInside(ctx.cwd, rel);
+    if (abs === null) return `Error: ${rel} is outside the workspace.`;
 
     let content: string;
     try {
@@ -535,7 +585,8 @@ export const multiEditTool: Tool = {
     if (!Array.isArray(edits) || edits.length === 0) {
       return "Error: 'edits' must be a non-empty array of { old_string, new_string }.";
     }
-    const abs = path.resolve(ctx.cwd, rel);
+    const abs = resolveInside(ctx.cwd, rel);
+    if (abs === null) return `Error: ${rel} is outside the workspace.`;
 
     let content: string;
     try {
@@ -621,13 +672,28 @@ function shapeExecResult(err: unknown, stdout: string, stderr: string): ExecResu
   };
 }
 
+/**
+ * Optional containment hook (Layer 3): if QWEN_HARNESS_SANDBOX is set, shell commands run INSIDE the
+ * user-supplied sandbox (e.g. `bwrap …`, `sandbox-exec -f …`, a `docker run …` wrapper). Returns the
+ * prefix argv, or [] when unset (default — behavior unchanged). The command is passed as a single argv
+ * to the inner shell, so there is no re-quoting. See USER-GUIDE "Running contained".
+ */
+export function sandboxPrefix(): string[] {
+  const s = process.env.QWEN_HARNESS_SANDBOX?.trim();
+  return s ? s.split(/\s+/) : [];
+}
+
 function runShell(command: string, cwd: string, timeoutMs: number): Promise<ExecResult> {
+  const opts = { cwd, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024, windowsHide: true };
+  const box = sandboxPrefix();
   return new Promise((resolve) => {
-    exec(
-      command,
-      { cwd, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024, windowsHide: true },
-      (err, stdout, stderr) => resolve(shapeExecResult(err, stdout, stderr)),
-    );
+    if (box.length) {
+      execFile(box[0], [...box.slice(1), "sh", "-c", command], opts, (err, stdout, stderr) =>
+        resolve(shapeExecResult(err, stdout, stderr)),
+      );
+    } else {
+      exec(command, opts, (err, stdout, stderr) => resolve(shapeExecResult(err, stdout, stderr)));
+    }
   });
 }
 
@@ -636,13 +702,17 @@ function runShell(command: string, cwd: string, timeoutMs: number): Promise<Exec
 const POWERSHELL_BIN = process.platform === "win32" ? "powershell.exe" : "pwsh";
 
 function runPowerShell(command: string, cwd: string, timeoutMs: number): Promise<ExecResult> {
+  const opts = { cwd, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024, windowsHide: true };
+  const box = sandboxPrefix();
+  const psArgs = ["-NoProfile", "-NonInteractive", "-Command", command];
   return new Promise((resolve) => {
-    execFile(
-      POWERSHELL_BIN,
-      ["-NoProfile", "-NonInteractive", "-Command", command],
-      { cwd, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024, windowsHide: true },
-      (err, stdout, stderr) => resolve(shapeExecResult(err, stdout, stderr)),
-    );
+    if (box.length) {
+      execFile(box[0], [...box.slice(1), POWERSHELL_BIN, ...psArgs], opts, (err, stdout, stderr) =>
+        resolve(shapeExecResult(err, stdout, stderr)),
+      );
+    } else {
+      execFile(POWERSHELL_BIN, psArgs, opts, (err, stdout, stderr) => resolve(shapeExecResult(err, stdout, stderr)));
+    }
   });
 }
 
@@ -790,7 +860,8 @@ export const findFilesTool: Tool = {
     const pattern = asString(args.pattern);
     if (!pattern) return "Error: 'pattern' is required.";
     const rel = asString(args.path) || ".";
-    const root = path.resolve(ctx.cwd, rel);
+    const root = resolveInside(ctx.cwd, rel);
+    if (root === null) return `Error: ${rel} is outside the workspace.`;
     let regex: RegExp;
     try {
       regex = patternToRegExp(pattern);

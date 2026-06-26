@@ -16,7 +16,7 @@
 <img src="https://readme-typing-svg.demolab.com?font=Fira+Code&size=22&pause=900&color=8957E5&center=true&vCenter=true&width=680&lines=Private.+Offline.+Zero+dependencies.;A+real+AI+coding+agent+%E2%80%94+not+a+chatbot.;Powered+by+Ollama+%2B+Qwen%2C+on+YOUR+machine.;No+cloud.+No+API+keys.+No+data+leaves." alt="tagline" />
 
 <p>
-  <img src="https://img.shields.io/badge/tests-198%20passing-2ea44f" alt="tests" />
+  <img src="https://img.shields.io/badge/tests-211%20passing-2ea44f" alt="tests" />
   <img src="https://img.shields.io/badge/dependencies-0-2ea44f" alt="zero dependencies" />
   <img src="https://img.shields.io/badge/build-none-2ea44f" alt="no build step" />
   <img src="https://img.shields.io/badge/runs-100%25%20offline-6e40c9" alt="offline" />
@@ -44,11 +44,12 @@ No cloud. No API keys. No telemetry. Your code never leaves your computer.
 - 🤖 **A real agent, not a chatbot.** It reads, searches, writes, and edits files and
   runs commands in a permission-gated **read → decide → act → observe** loop —
   including **multi-agent** delegation, **long-term memory**, and **resumable sessions**.
-- 🛡️ **Safe by default.** Every action passes a permission gate, and clearly
-  dangerous commands are always blocked.
+- 🛡️ **Safe by default.** Every action passes a permission gate, **file tools are confined to your
+  workspace** (symlink-proof), and the most dangerous commands are blocked. For full isolation, run it
+  inside Docker/WSL or set a sandbox wrapper.
 - 🪶 **Built for small local models.** Argument validation + repair, malformed
   tool-call recovery, and automatic context compaction make modest models reliable.
-- ✅ **Battle-tested.** 198 automated tests, plus a mandatory secret scan on every run.
+- ✅ **Battle-tested.** 211 automated tests, plus a mandatory secret scan on every run.
 
 ## ✨ What it can do
 
@@ -145,7 +146,7 @@ npm start -- "list the files here and tell me which is largest"
 
 ## ⭐ At a glance
 
-**198 tests · 0 dependencies · no build step · 100% offline · Apache-2.0 licensed.**
+**211 tests · 0 dependencies · no build step · 100% offline · Apache-2.0 licensed.**
 
 ## 🔎 Keywords
 

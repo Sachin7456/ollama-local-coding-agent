@@ -296,7 +296,18 @@ Or switch while chatting:
 ```
 /mode acceptEdits
 ```
-The destructive-command block stays on in every mode.
+The built-in block for the most destructive commands stays on in every mode — but treat it as a
+safety net, not a guarantee. For real isolation (especially with `acceptEdits` / `bypass`), run the
+tool **contained**.
+
+**Running contained (optional, stronger isolation).** The surest way to keep the agent off the rest of
+your machine is to run the whole tool inside a container or VM:
+- **Docker / WSL2 (any OS):** run `npm start` inside a container or a WSL2 shell whose only writable
+  mount is your project folder. This is the most portable real isolation — and it works on Windows too.
+- **A sandbox wrapper (Linux/macOS):** set `QWEN_HARNESS_SANDBOX` to a sandbox command and every shell
+  command the agent runs is launched inside it — e.g.
+  `QWEN_HARNESS_SANDBOX="bwrap --ro-bind / / --bind . . --unshare-net"` (Linux, bubblewrap), or a
+  `sandbox-exec -f profile.sb` profile (macOS). Leave it unset for the normal behavior.
 
 ---
 
@@ -429,8 +440,12 @@ runs only at launch, so it never slows things down once you're working.)
 - **Your chats and remembered facts:** a hidden folder in your home directory
   (`~/.qwen-harness/`).
 - **The tool itself:** the `qwen-harness` folder you launched it from.
-- **Your work:** it only touches files inside the folder you run it in — your
-  current project.
+- **Your work:** it only reads or writes files inside the folder you run it in — paths that try to
+  escape (`../…`, absolute paths outside it, or symlinks that point out) are refused.
+
+**Scripting note.** For non-interactive use, pass the task in one shot —
+`npm start -- "summarize README.md"` — rather than piping multiple lines into the prompt (when input
+is piped, only the first line runs).
 
 ---
 

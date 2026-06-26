@@ -15,6 +15,10 @@
 
 export type PermissionDecision = "allow" | "ask" | "deny";
 export type PermissionMode = "default" | "acceptEdits" | "plan" | "bypass";
+export const PERMISSION_MODES: readonly PermissionMode[] = ["default", "acceptEdits", "plan", "bypass"];
+export function isPermissionMode(s: string): s is PermissionMode {
+  return (PERMISSION_MODES as readonly string[]).includes(s);
+}
 
 export interface PermissionRequest {
   toolName: string;
@@ -71,8 +75,8 @@ export const DANGEROUS_COMMAND_PATTERNS: RegExp[] = [
   /\b(shutdown|reboot|halt|poweroff)\b/i, // power state
   /\b(curl|wget)\b[^|]*\|\s*(sudo\s+)?(sh|bash|zsh)\b/i, // pipe download to shell
   /\bformat\s+[a-zA-Z]:/i, // Windows: format C:
-  /Remove-Item\b[^\n]*-Recurse\b[^\n]*-Force\b/i, // PowerShell recursive force delete
-  /\bdel\b\s+\/[sq]\b/i, // Windows del /s /q
+  /\b(?:Remove-Item|ri|rm)\b(?=[^\n]*-Recurse\b)(?=[^\n]*-Force\b)/i, // PS recursive force delete — any flag order, ri/rm aliases
+  /\bdel\b[^\n]*\s\/[sq]\b/i, // Windows del /s /q — any flag order (e.g. del /f /s /q)
   /\bchmod\s+(-[a-z]*\s+)*-R[a-z]*\s+[^\n]*\b(777|000)\b/i, // chmod -R 777/000 (world-writable / lockout)
   /\bchown\s+(-[a-z]*\s+)*-R[a-z]*\s+[^\n]*\s(\/(\s|$)|\/etc\b|~(\/|\s|$))/i, // chown -R on / /etc ~
   /\bwipefs\b\s+\S/i, // wipe filesystem signatures
@@ -230,6 +234,9 @@ export class PermissionEngine {
     return this.cfg.mode;
   }
   setMode(m: PermissionMode): void {
+    if (!isPermissionMode(m)) {
+      throw new Error(`invalid mode "${m}" — must be one of: ${PERMISSION_MODES.join(", ")}`);
+    }
     this.cfg.mode = m;
   }
   /** Add an allow rule at runtime (used by "always allow this command"). */
@@ -277,6 +284,11 @@ export class PermissionEngine {
       isReadOnlyPowerShellCommand(typeof req.args.command === "string" ? req.args.command : "")
     ) {
       return { decision: "allow", reason: "read-only shell command" };
+    }
+    // plan mode = no changes at all: a tool that writes harness state (remember) is denied even though
+    // it is flagged read-only for the workspace.
+    if (this.cfg.mode === "plan" && req.toolName === "remember") {
+      return { decision: "deny", reason: "plan mode makes no changes" };
     }
     if (req.readOnly) return { decision: "allow", reason: "read-only tool" };
     if (this.cfg.mode === "plan") return { decision: "deny", reason: "plan mode is read-only" };

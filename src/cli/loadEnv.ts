@@ -15,14 +15,18 @@ export function parseDotEnv(text: string): Record<string, string> {
     if (!line || line.startsWith("#")) continue;
     const eq = line.indexOf("=");
     if (eq < 0) continue;
-    const key = line.slice(0, eq).trim();
+    let key = line.slice(0, eq).trim();
+    if (key.startsWith("export ")) key = key.slice("export ".length).trim(); // shell-style `export FOO=bar`
     if (!key) continue;
     let value = line.slice(eq + 1).trim();
-    if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
+    const quoted =
+      value.length >= 2 &&
+      ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")));
+    if (quoted) {
       value = value.slice(1, -1);
+    } else {
+      const hash = value.indexOf(" #"); // strip an inline comment on an unquoted value: `KEY=val # note`
+      if (hash >= 0) value = value.slice(0, hash).trim();
     }
     out[key] = value;
   }

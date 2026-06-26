@@ -34,6 +34,23 @@ test("skips lines without '=' and trims whitespace", () => {
   assert.deepEqual(out, { KEY: "val" });
 });
 
+test("strips an inline # comment on an unquoted value (B7)", () => {
+  const out = parseDotEnv("HARNESS_MODEL=qwen2.5-coder:7b # default model\nB=plain");
+  assert.equal(out.HARNESS_MODEL, "qwen2.5-coder:7b");
+  assert.equal(out.B, "plain");
+});
+
+test("does not strip a # inside quotes, and keeps a # with no leading space (B7)", () => {
+  assert.equal(parseDotEnv(`A="a # b"`).A, "a # b");
+  assert.equal(parseDotEnv("P=pa#ss").P, "pa#ss"); // no space before # → part of the value
+});
+
+test("handles a shell-style `export ` prefix on the key (B7)", () => {
+  const out = parseDotEnv("export FOO=bar");
+  assert.equal(out.FOO, "bar");
+  assert.equal(out["export FOO"], undefined);
+});
+
 test("loadDotEnv: an empty value (KEY=) is treated as UNSET — so defaults still apply", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "qh-env-"));
   const file = path.join(dir, ".env");

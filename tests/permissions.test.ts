@@ -39,6 +39,22 @@ test("plan mode denies mutating tools but still allows reads", () => {
   assert.equal(p.decide(mut("write_file")).decision, "deny");
 });
 
+test("plan mode denies remember (writes harness memory); allowed elsewhere (B8)", () => {
+  assert.equal(createDefaultPermissions("plan").decide(ro("remember", { fact: "x" })).decision, "deny");
+  assert.equal(createDefaultPermissions("plan").decide(ro("read_file")).decision, "allow"); // real reads still ok
+  assert.equal(createDefaultPermissions("default").decide(ro("remember", { fact: "x" })).decision, "allow");
+});
+
+test("setMode validates against the 4 modes (B5)", () => {
+  const p = createDefaultPermissions("default");
+  for (const m of ["default", "acceptEdits", "plan", "bypass"] as const) {
+    p.setMode(m);
+    assert.equal(p.mode, m);
+  }
+  assert.throws(() => p.setMode("bogus" as never), /invalid mode/);
+  assert.equal(p.mode, "bypass"); // unchanged from the last valid set
+});
+
 test("acceptEdits mode auto-allows mutating tools", () => {
   const p = createDefaultPermissions("acceptEdits");
   assert.equal(p.decide(mut("write_file")).decision, "allow");
@@ -103,6 +119,34 @@ test("the hardened deny floor catches more destructive forms (and spares safe va
   // safe variants must NOT be denied
   const rule = dangerousCommandRule();
   for (const command of ["chmod -R 755 .", "chmod 644 a.txt", "chown -R user /home/u/app", "crontab -l", "shred.txt"]) {
+    assert.equal(rule.when?.({ command }), false, command);
+  }
+});
+
+test("deny floor is flag-ORDER independent for recursive force-delete (B3 — no new command families)", () => {
+  const rule = dangerousCommandRule();
+  // PowerShell recursive force delete — every flag order + ri/rm aliases (same command, not enumeration)
+  for (const command of [
+    "Remove-Item -Recurse -Force C:\\x",
+    "Remove-Item -Force -Recurse C:\\x", // reordered — used to SLIP
+    "ri -Recurse -Force .",
+    "rm -Recurse -Force .", // PS rm alias
+    "Remove-Item C:\\x -Force -Recurse", // target between flags
+  ]) {
+    assert.equal(rule.when?.({ command }), true, command);
+  }
+  // Windows del recursive — any flag order (leading /f used to SLIP)
+  for (const command of ["del /f /s /q C:\\x", "del /s C:\\x", "del C:\\x /s"]) {
+    assert.equal(rule.when?.({ command }), true, command);
+  }
+  // legit / non-recursive variants must NOT be denied (they ASK, not deny)
+  for (const command of [
+    "Remove-Item x", // no -Recurse/-Force
+    "Remove-Item x -Force", // force but not recursive
+    "rm -rf ./build", // legit project subdir
+    "del file.txt", // single file
+    "Get-ChildItem -Recurse", // read-only
+  ]) {
     assert.equal(rule.when?.({ command }), false, command);
   }
 });
