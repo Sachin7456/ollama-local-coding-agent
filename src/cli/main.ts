@@ -22,6 +22,7 @@ import { Semaphore } from "../orchestration/gate.ts";
 import { runOrchestrator } from "../orchestration/orchestrator.ts";
 import { Session, listSessions } from "../state/session.ts";
 import { rememberTool, recallTool, buildMemoryBlock } from "../state/memory.ts";
+import { loadProjectRules } from "../state/projectRules.ts";
 import type { ChatMessage } from "../model/ollamaClient.ts";
 
 const SYSTEM_PROMPT = `You are a coding assistant working in a local project directory.
@@ -200,6 +201,15 @@ async function main(): Promise<void> {
   const rl = readline.createInterface({ input: stdin, output: stdout });
 
   const onAsk = async (info: AskInfo): Promise<boolean> => {
+    // Non-interactive (one-shot / piped stdin): we can't prompt — deny safely instead of crashing on
+    // rl.question (ERR_USE_AFTER_CLOSE). Fail-safe: unprovable → deny, with guidance.
+    if (!stdin.isTTY) {
+      console.error(
+        `\n⛔ non-interactive: denied ${info.toolName} (needs confirmation). ` +
+          `Re-run interactively, or use --mode acceptEdits to auto-allow edits.`,
+      );
+      return false;
+    }
     const reply = parseAskReply(
       await rl.question(
         `\n⚠️  Allow ${info.toolName}(${JSON.stringify(info.args)})?  [${info.reason}]  (y = once · a = always · N = no) `,
@@ -248,7 +258,8 @@ async function main(): Promise<void> {
     const onMessage = (m: ChatMessage): void => session.appendMessage(m);
     const compaction = { numCtx: resolveModel(activeModel).numCtx, threshold: 0.75, keepRecent: 8, toolResultCap: 2000 };
     const memBlock = buildMemoryBlock(text);
-    const base = memBlock ? `${SYSTEM_PROMPT}\n\n${memBlock}` : SYSTEM_PROMPT;
+    const projectRules = loadProjectRules(ctx.cwd); // optional ./AGENTS.md / .qwen-harness.md project conventions
+    const base = [SYSTEM_PROMPT, memBlock, projectRules].filter(Boolean).join("\n\n");
     const sysPrompt = `${base}\n\n${shellGuidance(process.platform)}\n\n${CRITICAL_RULES}`; // critical rules LAST (recency for small models)
     const ac = new AbortController();
     activeAbort = ac;
