@@ -72,9 +72,14 @@ export interface AgentResult {
 
 const MAX_TURNS_DEFAULT = 10;
 const MAX_CONSECUTIVE_DENIALS = 3;
-const MAX_CONSECUTIVE_NUDGES = 1; // one reminder when a turn does nothing; resets on tool-call progress
+const MAX_CONSECUTIVE_NUDGES = 1; // one reminder when a turn stalls; resets on tool-call progress
 const NO_ACTION_NUDGE =
   "You did not call a tool or give an answer. Either call a tool now to do the work, or give your final answer.";
+
+const NARRATION_RE =
+  /\b(?:please|kindly|can you|could you|would you|let me|let['']s|i['']ll|i will|i['']m going to|i am going to|i can|i could|next,? i|we (?:can|could|should|need to|will))\b[^.\n]{0,40}?\b(?:read|re-?read|open|view|look at|check|inspect|examine|run|execute|search|grep|find|locate|list|cat|show|display|edit|write|create|modify|use the|call the|invoke)\b/i;
+const NARRATION_NUDGE =
+  'Do not describe the action or ask me to do it — emit the tool call yourself now, as JSON: {"name":"read_file","arguments":{"path":"<path>"}}. If the task is already done, give your 1-2 sentence final answer.';
 const MAX_CONSECUTIVE_REPEATS = 2; // the 3rd identical tool-call turn in a row = a stuck loop -> stop
 const LOOP_WARNING =
   "You've repeated the same action without making progress. Try a different approach, or give your final answer.";
@@ -162,13 +167,16 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentResult> {
 
     // No tool calls.
     if (toolCalls.length === 0) {
-      // Idle guard: a turn that neither called a tool nor produced real text (e.g. thinking-only).
-      // Nudge the model to act ONCE (resets on progress) so a weak model can't silently stall.
-      // Non-empty prose is still accepted as the final answer (narration is indistinguishable
-      // from a genuine short answer).
-      if (assistantText.trim().length === 0 && consecutiveNudges < MAX_CONSECUTIVE_NUDGES) {
+      // Idle/narration guard (nudge ONCE, resets on tool-call progress, so a model can't silently stall):
+      //  - empty/think-only turn -> it produced nothing usable; or
+      //  - the turn merely DESCRIBED/deferred a tool action (e.g. "Please read the file X") with no call.
+      // Either way, push it to actually act this once. Bounded by MAX_CONSECUTIVE_NUDGES => never an infinite
+      // loop; a genuine short answer (no action phrasing) still terminates immediately.
+      const empty = assistantText.trim().length === 0;
+      const narrated = !empty && NARRATION_RE.test(assistantText);
+      if ((empty || narrated) && consecutiveNudges < MAX_CONSECUTIVE_NUDGES) {
         consecutiveNudges++;
-        record({ role: "user", content: NO_ACTION_NUDGE });
+        record({ role: "user", content: empty ? NO_ACTION_NUDGE : NARRATION_NUDGE });
         continue;
       }
       emit({ type: "done", reason: "model returned a final answer", turns: turn });

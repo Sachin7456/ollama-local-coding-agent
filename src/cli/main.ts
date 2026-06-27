@@ -40,6 +40,7 @@ How to work:
 // even when a memory block is inserted before it.
 const CRITICAL_RULES = `Most important — every turn:
 - Do NOT say you can, could, or will do something. DO it by calling the tool. "I can read that file" is wrong; calling read_file is right.
+- Never ask the user to read, open, run, or search anything ("please read…", "let me read…", "I'll run…"). You have the tools — emit the tool call yourself now, as JSON like {"name":"read_file","arguments":{"path":"…"}}.
 - Each turn either CALL a tool (one or more) to make progress, OR give your final answer — never neither.
 - Give the final answer only when the task is actually done: a 1-2 sentence summary, with no tool call.`;
 

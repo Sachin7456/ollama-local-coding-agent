@@ -412,6 +412,54 @@ test("plain prose with no tool call is still accepted as the final answer (no nu
   }
 });
 
+test("narration (text describing a tool action, no call) is nudged once, then the model acts", async () => {
+  // turn 0: narrate instead of calling; turn 1: actually call read_file; turn 2: final answer.
+  const m = await scriptedModel((i) => {
+    if (i === 0) return { content: "Please read the file a.txt to find the answer." };
+    if (i === 1) return { tool_calls: [toolCall("read_file", { path: "a.txt" })] };
+    return { content: "The file says hello world." };
+  });
+  try {
+    const res = await runAgent({
+      client: m.client,
+      registry: createDefaultRegistry(),
+      permissions: createDefaultPermissions("default"),
+      ctx: { cwd: tmp },
+      userMessage: "what's in a.txt?",
+    });
+    assert.equal(res.stopReason, "completed");
+    assert.equal(res.turns, 3); // narrate -> (nudge) -> call -> answer
+    assert.match(res.text, /hello world/);
+    // the narration nudge (NOT the empty-turn nudge) was injected
+    assert.ok(
+      res.messages.some((x) => x.role === "user" && /emit the tool call yourself/.test(x.content ?? "")),
+      "a narration nudge was injected",
+    );
+    // it did NOT stop on turn 1 treating the narration as the final answer
+    assert.ok(!/please read the file/i.test(res.text), "narration was not accepted as the answer");
+  } finally {
+    await m.close();
+  }
+});
+
+test("a model that only ever narrates is nudged once, then stops (no infinite loop)", async () => {
+  const m = await scriptedModel(() => ({ content: "Let me read the config file to check." }));
+  try {
+    const res = await runAgent({
+      client: m.client,
+      registry: createDefaultRegistry(),
+      permissions: createDefaultPermissions("default"),
+      ctx: { cwd: tmp },
+      userMessage: "x",
+    });
+    assert.equal(res.stopReason, "completed");
+    assert.equal(res.turns, 2); // turn 1 nudged, turn 2 capped -> accept as final
+    assert.equal(m.callCount(), 2);
+  } finally {
+    await m.close();
+  }
+});
+
 // ---------------- parallel tool calls (multiple in one turn) ----------------
 test("runs multiple read tool calls in one turn, recording results in tool_call order", async () => {
   await fs.writeFile(path.join(tmp, "p1.txt"), "FIRST file\n");

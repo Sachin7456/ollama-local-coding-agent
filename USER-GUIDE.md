@@ -99,7 +99,8 @@ you point the tool at it using **two small files in the project folder** (the fo
 >
 > **Pick a 7B+ tool-capable coder model** (e.g. `qwen2.5-coder:7b`). Tool-calling becomes reliable only
 > around ~7B; **3B / 0.6B models often *narrate* ("I can read that file") instead of calling the tool**,
-> even with a good prompt. The harness nudges once when a turn does nothing, but smaller models stay
+> even with a good prompt. The harness nudges once when a turn does nothing **or merely describes a tool
+> action instead of calling it** (it re-prompts with the exact call format), but smaller models stay
 > best-effort — for real work, use 7B+. (If a model gets stuck repeating the same action, the harness
 > stops it with `[stopped: loop]` instead of grinding on.)
 
