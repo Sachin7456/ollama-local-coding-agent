@@ -139,11 +139,28 @@ test("deny floor is flag-ORDER independent for recursive force-delete (B3 — no
   for (const command of ["del /f /s /q C:\\x", "del /s C:\\x", "del C:\\x /s"]) {
     assert.equal(rule.when?.({ command }), true, command);
   }
+  // POSIX rm recursive+force on a catastrophic target — every flag order (separated / long / interspersed)
+  for (const command of [
+    "rm -rf /",
+    "rm -fr /", // combined, reversed
+    "rm -r -f /", // separated — used to SLIP
+    "rm -f -r /", // separated, reversed — used to SLIP
+    "rm --recursive --force /", // long flags — used to SLIP
+    "rm --force --recursive /", // long, reversed
+    "rm -v -r -f /", // interspersed extra flag
+    "rm -rf /*",
+    "rm -rf ~",
+    "rm -rf --no-preserve-root /",
+  ]) {
+    assert.equal(rule.when?.({ command }), true, command);
+  }
   // legit / non-recursive variants must NOT be denied (they ASK, not deny)
   for (const command of [
     "Remove-Item x", // no -Recurse/-Force
     "Remove-Item x -Force", // force but not recursive
     "rm -rf ./build", // legit project subdir
+    "rm -rf /tmp/x", // legit delete under /tmp (target not catastrophic)
+    "rm -i -v /tmp/x", // no recursive flag
     "del file.txt", // single file
     "Get-ChildItem -Recurse", // read-only
   ]) {
@@ -176,6 +193,40 @@ test("isReadOnlyPowerShellCommand: read-only cmdlet pipelines allow, everything 
   }
 });
 
+test("B12: any Get-* verb cmdlet + netstat auto-allow (verb principle, not enumeration)", () => {
+  for (const c of [
+    "Get-NetTCPConnection -State Listen | Measure-Object",
+    "Get-WmiObject Win32_Process",
+    "Get-CimInstance Win32_Service",
+    "Get-NetAdapter",
+  ]) {
+    assert.equal(isReadOnlyPowerShellCommand(c), true, c);
+  }
+  assert.equal(isReadOnlyBashCommand("netstat -an"), true);
+  assert.equal(isReadOnlyBashCommand("ss -tln"), true);
+  // dual-use commands (mutate with some args, e.g. `ipconfig /release`, `date -s`, bare `date 20260101`,
+  // `hostname x`) are NOT name-allowlisted → ask (a static per-arg check is unsafe — see permissions.ts NOTE)
+  assert.equal(isReadOnlyBashCommand("ipconfig /release"), false);
+  assert.equal(isReadOnlyBashCommand("date"), false);
+  assert.equal(isReadOnlyBashCommand("date -s 2026-01-01"), false);
+  assert.equal(isReadOnlyBashCommand("date 20260101"), false); // bare positional clock-set — the root-cause trap
+  assert.equal(isReadOnlyBashCommand("hostname"), false);
+  assert.equal(isReadOnlyBashCommand("hostname newname"), false);
+  // script blocks / sub-expressions still ask even with a Get-* lead; non-Get verbs still ask
+  assert.equal(isReadOnlyPowerShellCommand("Get-Process | Where-Object {$_.CPU -gt 10}"), false);
+  assert.equal(isReadOnlyPowerShellCommand("Set-Content a.txt b"), false);
+});
+
+test("B13: an unrecognized shell command asks with an accurate (not 'mutating') reason", () => {
+  const p = createDefaultPermissions("default");
+  const r = p.decide(mut("bash", { command: "npm test" })); // not read-only, not dangerous → ask
+  assert.equal(r.decision, "ask");
+  assert.match(r.reason, /read-only command/);
+  assert.doesNotMatch(r.reason, /mutating/);
+  // a genuine mutating tool keeps the original reason
+  assert.match(p.decide(mut("write_file", { path: "a.txt" })).reason, /mutating/);
+});
+
 test("powershell auto-allows safe cmdlets; deny floor still blocks Remove-Item -Recurse -Force", () => {
   const p = createDefaultPermissions("default");
   assert.equal(
@@ -197,6 +248,20 @@ test("addAllowRule + commandPrefix: remembered command auto-allows (word-boundar
   // a remembered allow can NEVER override the dangerous-command deny floor (deny is checked first)
   p.addAllowRule({ tool: "bash", decision: "allow", commandPrefix: "rm -rf /" });
   assert.equal(p.decide(mut("bash", { command: "rm -rf /" })).decision, "deny");
+});
+
+test("commandPrefix compound-guard: a remembered prefix does NOT auto-allow a chained command", () => {
+  const p = createDefaultPermissions("default");
+  p.addAllowRule({ tool: "bash", decision: "allow", commandPrefix: "npm test" });
+  // chained / piped / redirected / substituted → guard rejects the match → ask (NOT allow)
+  for (const cmd of ["npm test && npm publish", "npm test | sh", "npm test; rm x", "npm test > out", "npm test $(whoami)"]) {
+    assert.equal(p.decide(mut("bash", { command: cmd })).decision, "ask", cmd);
+  }
+  // the plain remembered command + simple args still auto-allow
+  assert.equal(p.decide(mut("bash", { command: "npm test" })).decision, "allow");
+  assert.equal(p.decide(mut("bash", { command: "npm test --watch" })).decision, "allow");
+  // a chained command containing a catastrophic part is still DENIED (deny floor first)
+  assert.equal(p.decide(mut("bash", { command: "npm test && rm -rf /" })).decision, "deny");
 });
 
 // ---------------- explicit rules ----------------

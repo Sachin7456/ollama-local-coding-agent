@@ -35,3 +35,19 @@ test("store: rememberAllowRule persists + loadPermissionRules round-trips (dedup
   assert.ok(rules.some((r) => r.tool === "bash" && r.commandPrefix === "npm test"));
   assert.ok(rules.some((r) => r.tool === "powershell" && r.commandPrefix === "Get-Process"));
 });
+
+test("store: persists a schema version and leaves no temp file (atomic write)", async () => {
+  assert.equal(rememberAllowRule("bash", "ls -la"), true);
+  const raw = JSON.parse(await fs.readFile(path.join(tmp, "permissions.json"), "utf8"));
+  assert.equal(raw.version, 1);
+  assert.ok(Array.isArray(raw.allow) && raw.allow.some((r: { commandPrefix: string }) => r.commandPrefix === "ls -la"));
+  await assert.rejects(fs.stat(path.join(tmp, "permissions.json.tmp"))); // temp file must not linger
+});
+
+test("store: an OLD versionless {allow:[…]} file still loads (forward-compat)", async () => {
+  await fs.writeFile(
+    path.join(tmp, "permissions.json"),
+    JSON.stringify({ allow: [{ tool: "bash", commandPrefix: "git status" }] }),
+  );
+  assert.ok(loadPermissionRules().some((r) => r.commandPrefix === "git status"));
+});

@@ -54,6 +54,10 @@ function ruleMatches(rule: PermissionRule, req: PermissionRequest): boolean {
   if (rule.tool !== "*" && rule.tool !== req.toolName) return false;
   if (rule.commandPrefix !== undefined) {
     const cmd = typeof req.args.command === "string" ? req.args.command.trim() : "";
+    // Compound-command guard: a remembered prefix must NOT auto-allow a chained / redirected / substituted
+    // command (`prefix && evil`, `prefix | sh`, `prefix; …`, `prefix > f`, `$(…)`). Any such char → no match
+    // → fall through to ask / the deny floor. Parser-free.
+    if (/[;&|<>`\n\r]|\$\(/.test(cmd)) return false;
     if (cmd !== rule.commandPrefix && !cmd.startsWith(rule.commandPrefix + " ")) return false;
   }
   if (rule.when && !rule.when(req.args)) return false;
@@ -66,7 +70,7 @@ function ruleMatches(rule: PermissionRule, req: PermissionRequest): boolean {
  * Windows/PowerShell since this machine is Windows.
  */
 export const DANGEROUS_COMMAND_PATTERNS: RegExp[] = [
-  /\brm\s+-[a-zA-Z]*(rf|fr)[a-zA-Z]*\s+(\/(\s|$|\*)|~|\$HOME|--no-preserve-root)/i, // rm -rf / ~ /* etc.
+  /\brm\b(?=[^\n]*\s-[a-zA-Z-]*r)(?=[^\n]*\s-[a-zA-Z-]*f)[^\n]*\s(?:\/(?:\s|$|\*)|~|\$HOME|--no-preserve-root)/i, // rm recursive+force on / ~ $HOME /* --no-preserve-root — any flag order (-rf, -r -f, --recursive --force, interspersed)
   /:\(\)\s*\{\s*:\s*\|\s*:&?\s*\}\s*;\s*:/, // fork bomb
   /\bmkfs(\.\w+)?\s/i, // make filesystem
   /\bdd\b[^\n]*\bof=\/dev\//i, // dd onto a device
@@ -113,7 +117,12 @@ const SHELL_METACHARS = /[|&;<>$`(){}\[\]*?~!\\'"\n\r]/;
 
 const READONLY_COMMANDS = new Set([
   "ls", "dir", "pwd", "cat", "head", "tail", "wc", "find", "grep", "rg", "ps", "du", "df",
-  "stat", "file", "tree", "echo", "which", "where", "date", "whoami", "hostname", "uname",
+  "stat", "file", "tree", "echo", "which", "where", "whoami", "uname",
+  "netstat", "ss", "lsof", // read-only network/system inspection
+  // NOTE: ifconfig/ipconfig/date/hostname are DUAL-USE (mutate with some args, e.g. `ipconfig /release`,
+  // `date -s` / bare positional `date 20260101`, `hostname x`) — NOT name-allowlisted; they fall through to
+  // "ask" (fail-safe). No static per-arg check is safe: `date` can set the clock via a bare positional arg
+  // with NO flag at all — a survey of 12 OSS harnesses found none solve this without a container/LLM.
 ]);
 
 // find actions that write or execute → never auto-allow.
@@ -218,7 +227,11 @@ export function isReadOnlyPowerShellCommand(command: string): boolean {
   for (const seg of cmd.split("|")) {
     const head = seg.trim().split(/\s+/)[0]?.toLowerCase();
     if (!head) return false;
-    if (!PS_READONLY_CMDLETS.has(PS_ALIASES[head] ?? head)) return false;
+    const resolved = PS_ALIASES[head] ?? head;
+    // PowerShell convention: a `Get-*` verb cmdlet is read-only — auto-allow ANY of them (so new ones
+    // like Get-NetTCPConnection / Get-WmiObject scale WITHOUT code edits), plus the explicit non-Get
+    // safe set above. (PS_DANGER already rejected script blocks / sub-expressions / `(`, `{`, `$`.)
+    if (!resolved.startsWith("get-") && !PS_READONLY_CMDLETS.has(resolved)) return false;
   }
   return true;
 }
@@ -294,6 +307,9 @@ export class PermissionEngine {
     if (this.cfg.mode === "plan") return { decision: "deny", reason: "plan mode is read-only" };
     if (this.cfg.mode === "acceptEdits") {
       return { decision: "allow", reason: "acceptEdits mode allows mutations" };
+    }
+    if (req.toolName === "bash" || req.toolName === "powershell") {
+      return { decision: "ask", reason: "not a recognized read-only command — confirm" };
     }
     return { decision: "ask", reason: "mutating tool requires confirmation" };
   }

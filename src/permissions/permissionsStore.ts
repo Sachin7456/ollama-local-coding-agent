@@ -40,14 +40,21 @@ export function loadPermissionRules(): PermissionRule[] {
   }));
 }
 
-/** Append a remembered allow rule (deduped) and persist. Returns false on write failure. */
+const STORE_VERSION = 1; // bump + migrate in readStored() if the on-disk shape ever changes
+
+/** Append a remembered allow rule (deduped) and persist atomically. Returns false on write failure. */
 export function rememberAllowRule(tool: string, commandPrefix: string): boolean {
   const rules = readStored();
   if (rules.some((r) => r.tool === tool && r.commandPrefix === commandPrefix)) return true;
   rules.push({ tool, commandPrefix });
   try {
     fs.mkdirSync(harnessDir(), { recursive: true });
-    fs.writeFileSync(storePath(), JSON.stringify({ allow: rules }, null, 2), "utf8");
+    // Atomic write: write a temp file then rename over the target (rename is atomic on one volume), so a
+    // crash mid-write can never leave a corrupt permissions.json. `version` enables future migrations.
+    const file = storePath();
+    const tmp = `${file}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify({ version: STORE_VERSION, allow: rules }, null, 2), "utf8");
+    fs.renameSync(tmp, file);
     return true;
   } catch {
     return false;
