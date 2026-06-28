@@ -42,3 +42,12 @@ export async function runLines(
     if (!(await handle(raw.trim()))) break;
   }
 }
+
+/**
+ * Whether a REPL line should be dispatched as a slash-command. ONLY interactive input dispatches commands;
+ * piped / pasted / non-interactive input must treat a `/`-line as plain task text (so a pasted `/exit` or
+ * any `/word` can't silently control or end the run). Pure → unit-testable.
+ */
+export function isCommandLine(input: string, isInteractive: boolean): boolean {
+  return isInteractive && input.startsWith("/");
+}

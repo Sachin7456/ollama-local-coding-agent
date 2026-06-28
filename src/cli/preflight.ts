@@ -7,6 +7,35 @@
 // Checks: Node version (for native type-stripping), Ollama reachable, and that the
 // required model(s) are pulled. Each failure includes the simplest fix.
 
+import os from "node:os";
+
+/**
+ * Best-effort RAM headroom check for multi-model (multi-agent) runs. Sums the chosen models' `approxSizeGB`
+ * (+ ~20% for KV cache / framework overhead) and compares to total system RAM; returns a WARNING string if it
+ * likely won't fit, else null. Honest + zero-dep: it only WARNS (we can't reliably read GPU VRAM cross-platform
+ * without a dependency, and setting OLLAMA_* env vars from this client has no effect on an already-running
+ * Ollama server — see ROADMAP M13 for real memory-aware enforcement). Pure (totalMemBytes injectable) → testable.
+ */
+export function checkMemoryHeadroom(
+  requiredModels: string[],
+  models: Record<string, { approxSizeGB?: number }>,
+  totalMemBytes: number = os.totalmem(),
+): string | null {
+  let sumGB = 0;
+  for (const tag of requiredModels) {
+    const gb = models[tag]?.approxSizeGB;
+    if (typeof gb === "number" && gb > 0) sumGB += gb;
+  }
+  if (sumGB <= 0) return null; // unknown sizes — don't guess
+  const neededGB = sumGB * 1.2;
+  const haveGB = totalMemBytes / 1e9;
+  if (neededGB <= haveGB) return null;
+  return (
+    `the selected models need ~${neededGB.toFixed(1)} GB but this machine has ~${haveGB.toFixed(1)} GB RAM — ` +
+    `loading them together may exhaust memory and kill the run. Use a smaller model, single-agent mode, or fewer models.`
+  );
+}
+
 export interface PreflightInput {
   baseUrl: string;
   /** models that MUST be installed (active + worker) — missing = fatal. */

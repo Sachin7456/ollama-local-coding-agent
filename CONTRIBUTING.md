@@ -28,7 +28,7 @@ reproducible proofs and stable IDs (`HelpNNN`). Open an issue titled `[HelpNNN] 
 
 ## Tests (required before every PR)
 
-The project keeps a passing, zero-dependency test suite of **226 tests** under `tests/`,
+The project keeps a passing, zero-dependency test suite of **234 tests** under `tests/`,
 run by Node's built-in test runner — **no model or network is required** to run it.
 `npm test` runs every test file listed in the `"test"` script in `package.json`. Before
 you open a PR:

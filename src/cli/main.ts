@@ -16,12 +16,13 @@ import { createDefaultPermissions, isPermissionMode, PERMISSION_MODES, type Perm
 import { loadPermissionRules, rememberAllowRule } from "../permissions/permissionsStore.ts";
 import { runAgent, type AgentEvent, type AskInfo } from "../agent/agent.ts";
 import { resolveModel, resolveWorkerModel, fileRegistryModels, getModels, OLLAMA_BASE_URL } from "../model/config.ts";
-import { preflight, formatPreflight } from "../cli/preflight.ts";
-import { interruptAction, shellGuidance, parseAskReply, runLines } from "../cli/repl.ts";
+import { preflight, formatPreflight, checkMemoryHeadroom } from "../cli/preflight.ts";
+import { interruptAction, shellGuidance, parseAskReply, runLines, isCommandLine } from "../cli/repl.ts";
 import { Semaphore } from "../orchestration/gate.ts";
 import { runOrchestrator } from "../orchestration/orchestrator.ts";
-import { Session, listSessions } from "../state/session.ts";
+import { Session, listSessions, validateAndRecoverCwd } from "../state/session.ts";
 import { rememberTool, recallTool, buildMemoryBlock } from "../state/memory.ts";
+import { performStartupMigrations } from "../state/migration.ts";
 import { loadProjectRules } from "../state/projectRules.ts";
 import type { ChatMessage } from "../model/ollamaClient.ts";
 
@@ -179,6 +180,11 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   for (const w of pf.warnings) console.warn(`⚠️  ${w}`);
+  // A2: multi-agent loads two models at once — warn (don't block) if they likely won't fit in RAM together.
+  if (args.multi) {
+    const memWarn = checkMemoryHeadroom(requiredModels, getModels());
+    if (memWarn) console.warn(`⚠️  ${memWarn}`);
+  }
 
   // Session persistence: resume an existing transcript or start a fresh one.
   let history: ChatMessage[] = [];
@@ -188,9 +194,16 @@ async function main(): Promise<void> {
       const opened = Session.open(args.resume);
       session = opened.session;
       history = opened.messages;
-      // Resume in the session's ORIGINAL project dir so file tools, approvals, AND memory all use the right
-      // project — not wherever `--resume` happened to be launched from.
-      if (session.meta.cwd) ctx.cwd = session.meta.cwd;
+      // Resume in the session's ORIGINAL project dir so file tools, approvals, AND memory use the right project.
+      if (session.meta.cwd) {
+        const r = validateAndRecoverCwd(session.meta.cwd, process.cwd());
+        ctx.cwd = r.cwd;
+        if (r.recovered) {
+          console.warn(`⚠️  this session's project folder is gone (${session.meta.cwd}); using ${r.cwd} instead.`); // A4
+        } else if (r.cwd !== process.cwd()) {
+          console.log(`(resuming in this session's project: ${r.cwd})`); // A3: announce, don't switch silently
+        }
+      }
       console.log(`resumed session ${session.id} (${history.length} messages)`);
     } catch (e) {
       console.error(`⛔ ${(e as Error).message}`);
@@ -200,8 +213,13 @@ async function main(): Promise<void> {
     session = Session.create({ model: activeModel, cwd: ctx.cwd });
   }
 
+  // A1: one-time, fail-safe migration of any LEGACY global approvals/memory into this project's per-project store
+  // (so upgrading users don't silently "lose" their saved state). Idempotent via a manifest.
+  const migrated = performStartupMigrations(ctx.cwd);
+  if (migrated) console.log(`(${migrated})`);
+
   // Grow the auto-allow set from THIS PROJECT's "always allow" history (per-project; after any --resume has set
-  // ctx.cwd to the session's project above) — persisted, never global.
+  // ctx.cwd to the session's project above, and after the migration above) — persisted, never global.
   for (const r of loadPermissionRules(ctx.cwd)) permissions.addAllowRule(r);
 
   const rl = readline.createInterface({ input: stdin, output: stdout });
@@ -325,56 +343,61 @@ async function main(): Promise<void> {
 
   // One handler for a single line of REPL input — shared by the interactive loop AND the non-interactive
   // (piped/pasted) path so both dispatch slash-commands and tasks identically. Returns false to end the session.
-  const processInput = async (input: string): Promise<boolean> => {
+  const processInput = async (input: string, isInteractive = true): Promise<boolean> => {
     if (!input) return true;
-    if (input === "/exit" || input === "/quit") return false;
-    if (input === "/perms") {
-      const rules = loadPermissionRules(ctx.cwd);
-      if (rules.length === 0) console.log("no remembered 'always allow' rules yet (press 'a' at a permission prompt to add one).");
-      else for (const r of rules) console.log(`  ${r.tool}: ${r.commandPrefix}`);
-      return true;
-    }
-    if (input === "/models") {
-      console.log(`configured: ${Object.keys(getModels()).join(", ")}`);
-      try {
-        const installed = await client.listModels();
-        console.log(`installed in Ollama: ${installed.length ? installed.join(", ") : "(none)"}`);
-      } catch (e) {
-        console.log(`(couldn't query Ollama: ${(e as Error).message})`);
-      }
-      return true;
-    }
-    if (input === "/sessions") {
-      for (const s of listSessions()) console.log(`${s.id}  ${s.createdAt}  (${s.messages} msgs)  ${s.firstUser}`);
-      return true;
-    }
-    if (input === "/new") {
-      session = Session.create({ model: activeModel, cwd: ctx.cwd });
-      history = [];
-      console.log(`started new session ${session.id}`);
-      return true;
-    }
-    if (input.startsWith("/model ")) {
-      const tag = input.slice("/model ".length).trim();
-      if (getModels()[tag]) {
-        activeModel = tag;
-        console.log(`switched model -> ${tag}`);
-      } else {
-        console.log(`unknown model "${tag}". Known: ${Object.keys(getModels()).join(", ")}`);
-      }
-      return true;
-    }
-    if (input.startsWith("/mode ")) {
-      const m = input.slice("/mode ".length).trim();
-      if (!isPermissionMode(m)) {
-        console.log(`unknown mode "${m}". Valid: ${PERMISSION_MODES.join(", ")}`);
+    // A5: ONLY the interactive REPL dispatches slash-commands. Piped/pasted (non-interactive) input treats a
+    // "/"-line as plain task text, so a pasted `/exit` (or any `/word`) can't silently end or hijack the run.
+    if (isCommandLine(input, isInteractive)) {
+      if (input === "/exit" || input === "/quit") return false;
+      if (input === "/perms") {
+        const rules = loadPermissionRules(ctx.cwd);
+        if (rules.length === 0) console.log("no remembered 'always allow' rules yet (press 'a' at a permission prompt to add one).");
+        else for (const r of rules) console.log(`  ${r.tool}: ${r.commandPrefix}`);
         return true;
       }
-      permissions.setMode(m);
-      console.log(`mode -> ${permissions.mode}`);
-      return true;
-    }
-    if (input.startsWith("/")) {
+      if (input === "/models") {
+        console.log(`configured: ${Object.keys(getModels()).join(", ")}`);
+        try {
+          const installed = await client.listModels();
+          console.log(`installed in Ollama: ${installed.length ? installed.join(", ") : "(none)"}`);
+        } catch (e) {
+          console.log(`(couldn't query Ollama: ${(e as Error).message})`);
+        }
+        return true;
+      }
+      if (input === "/sessions") {
+        // A3: show only THIS project's sessions (not a global mix across every folder).
+        const rows = listSessions(ctx.cwd);
+        if (rows.length === 0) console.log("(no saved sessions for this project yet)");
+        else for (const s of rows) console.log(`${s.id}  ${s.createdAt}  (${s.messages} msgs)  ${s.firstUser}`);
+        return true;
+      }
+      if (input === "/new") {
+        session = Session.create({ model: activeModel, cwd: ctx.cwd });
+        history = [];
+        console.log(`started new session ${session.id}`);
+        return true;
+      }
+      if (input.startsWith("/model ")) {
+        const tag = input.slice("/model ".length).trim();
+        if (getModels()[tag]) {
+          activeModel = tag;
+          console.log(`switched model -> ${tag}`);
+        } else {
+          console.log(`unknown model "${tag}". Known: ${Object.keys(getModels()).join(", ")}`);
+        }
+        return true;
+      }
+      if (input.startsWith("/mode ")) {
+        const m = input.slice("/mode ".length).trim();
+        if (!isPermissionMode(m)) {
+          console.log(`unknown mode "${m}". Valid: ${PERMISSION_MODES.join(", ")}`);
+          return true;
+        }
+        permissions.setMode(m);
+        console.log(`mode -> ${permissions.mode}`);
+        return true;
+      }
       console.log(`unknown command "${input.split(" ")[0]}". commands: /exit  /model <tag>  /mode <mode>  /models  /perms  /sessions  /new`);
       return true;
     }
@@ -390,7 +413,7 @@ async function main(): Promise<void> {
   // backpressure, so a long-running task can't drop the lines queued behind it (the old single-question loop
   // processed only the first piped line). No prompt/banner in this mode.
   if (!stdin.isTTY) {
-    await runLines(rl, processInput);
+    await runLines(rl, (line) => processInput(line, false)); // A5: non-interactive → "/"-lines are plain text
     rl.close();
     return;
   }

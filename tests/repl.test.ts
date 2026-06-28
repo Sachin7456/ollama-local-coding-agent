@@ -2,7 +2,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { interruptAction, shellGuidance, parseAskReply, runLines } from "../src/cli/repl.ts";
+import { interruptAction, shellGuidance, parseAskReply, runLines, isCommandLine } from "../src/cli/repl.ts";
 
 // a tiny async-iterable of lines (stands in for piped readline input)
 async function* lines(...xs: string[]): AsyncGenerator<string> {
@@ -58,4 +58,16 @@ test("runLines: awaits each line before the next (sequential, not interleaved)",
     return true;
   });
   assert.deepEqual(order, ["start 1", "end 1", "start 2", "end 2"]); // line 1 fully done before line 2 starts
+});
+
+test("A5: isCommandLine — only interactive '/'-lines are commands; non-TTY treats them as text", () => {
+  // interactive: a "/"-line IS a command
+  assert.equal(isCommandLine("/exit", true), true);
+  assert.equal(isCommandLine("/model x", true), true);
+  // interactive: ordinary text is not a command
+  assert.equal(isCommandLine("fix the bug", true), false);
+  // non-interactive (piped/pasted): a "/"-line is NOT a command (run it as plain text)
+  assert.equal(isCommandLine("/exit", false), false);
+  assert.equal(isCommandLine("/anything", false), false);
+  assert.equal(isCommandLine("plain text", false), false);
 });

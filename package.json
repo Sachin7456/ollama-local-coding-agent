@@ -6,7 +6,7 @@
   "description": "A zero-dependency TypeScript agentic harness for local Qwen models via Ollama",
   "license": "Apache-2.0",
   "scripts": {
-    "test": "node --experimental-strip-types --test tests/config.test.ts tests/ollamaClient.test.ts tests/tools.test.ts tests/permissions.test.ts tests/agent.test.ts tests/toolCallRecovery.test.ts tests/mutating-tools.test.ts tests/multi-edit.test.ts tests/gate.test.ts tests/orchestrator.test.ts tests/streaming.test.ts tests/session.test.ts tests/compaction.test.ts tests/memory.test.ts tests/secret-scan.test.ts tests/config-models.test.ts tests/preflight.test.ts tests/env.test.ts tests/repl.test.ts tests/permissions-store.test.ts tests/project-rules.test.ts tests/repo-hygiene.test.ts",
+    "test": "node --experimental-strip-types --test tests/config.test.ts tests/ollamaClient.test.ts tests/tools.test.ts tests/permissions.test.ts tests/agent.test.ts tests/toolCallRecovery.test.ts tests/mutating-tools.test.ts tests/multi-edit.test.ts tests/gate.test.ts tests/orchestrator.test.ts tests/streaming.test.ts tests/session.test.ts tests/compaction.test.ts tests/memory.test.ts tests/secret-scan.test.ts tests/config-models.test.ts tests/preflight.test.ts tests/env.test.ts tests/repl.test.ts tests/permissions-store.test.ts tests/project-rules.test.ts tests/migration.test.ts tests/repo-hygiene.test.ts",
     "test:m0": "node --experimental-strip-types --test tests/config.test.ts",
     "test:m1": "node --experimental-strip-types --test tests/ollamaClient.test.ts",
     "test:m2": "node --experimental-strip-types --test tests/tools.test.ts",

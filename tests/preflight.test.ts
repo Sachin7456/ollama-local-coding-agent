@@ -3,7 +3,19 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { preflight, formatPreflight } from "../src/cli/preflight.ts";
+import { preflight, formatPreflight, checkMemoryHeadroom } from "../src/cli/preflight.ts";
+
+const GB = 1_000_000_000;
+test("A2: checkMemoryHeadroom warns only when models likely won't fit", () => {
+  const models = { "small:7b": { approxSizeGB: 4.7 }, "big:30b": { approxSizeGB: 18 } };
+  // 7b alone (~5.6 GB needed) fits in 16 GB → no warning
+  assert.equal(checkMemoryHeadroom(["small:7b"], models, 16 * GB), null);
+  // 7b + 30b (~27 GB needed) does NOT fit in 16 GB → warning
+  const warn = checkMemoryHeadroom(["small:7b", "big:30b"], models, 16 * GB);
+  assert.ok(warn && /GB/.test(warn), "over-budget returns a warning string");
+  // unknown sizes → no guess
+  assert.equal(checkMemoryHeadroom(["mystery"], {}, 1 * GB), null);
+});
 
 function fakeFetch(models: string[]): typeof fetch {
   return (async () => ({

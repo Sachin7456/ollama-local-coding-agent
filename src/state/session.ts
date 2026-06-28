@@ -59,6 +59,20 @@ export function projectDir(cwd: string): string {
   return dir;
 }
 
+/**
+ * Confirm a working dir still exists (e.g. a resumed session's original project may have been moved/deleted).
+ * Returns the attempted dir if it's a real directory, else the fallback with `recovered: true` — so the caller
+ * can warn cleanly instead of failing later with cryptic ENOENT/EACCES. Pure-ish (fs only) + unit-testable.
+ */
+export function validateAndRecoverCwd(attempted: string, fallback: string): { cwd: string; recovered: boolean } {
+  try {
+    if (fs.existsSync(attempted) && fs.statSync(attempted).isDirectory()) return { cwd: attempted, recovered: false };
+  } catch {
+    /* unreadable → treat as gone */
+  }
+  return { cwd: fallback, recovered: true };
+}
+
 export function sessionsDir(): string {
   const dir = path.join(harnessDir(), "sessions");
   fs.mkdirSync(dir, { recursive: true });
@@ -128,20 +142,26 @@ export class Session {
   }
 }
 
-/** List saved sessions, newest first. */
-export function listSessions(): SessionSummary[] {
+/**
+ * List saved sessions, newest first. Pass `filterByCwd` to show ONLY the sessions that belong to that project
+ * (same `projectKey`), so the list isn't a global mix across every folder. Backward-compatible: no arg = all.
+ */
+export function listSessions(filterByCwd?: string): SessionSummary[] {
   const dir = sessionsDir();
   const files = fs.readdirSync(dir).filter((f) => f.endsWith(".jsonl"));
-  const out: SessionSummary[] = files.map((f) => {
+  const wantKey = filterByCwd !== undefined ? projectKey(filterByCwd) : undefined;
+  const out: SessionSummary[] = [];
+  for (const f of files) {
     const id = f.replace(/\.jsonl$/, "");
     try {
       const { meta, messages } = Session.load(id);
+      if (wantKey !== undefined && (!meta.cwd || projectKey(meta.cwd) !== wantKey)) continue; // other project → skip
       const firstUser = messages.find((m) => m.role === "user")?.content ?? "";
-      return { id, createdAt: meta.createdAt, messages: messages.length, firstUser: firstUser.slice(0, 60) };
+      out.push({ id, createdAt: meta.createdAt, messages: messages.length, firstUser: firstUser.slice(0, 60) });
     } catch {
-      return { id, createdAt: "?", messages: 0, firstUser: "" };
+      if (wantKey === undefined) out.push({ id, createdAt: "?", messages: 0, firstUser: "" }); // unparseable: only when unfiltered
     }
-  });
+  }
   out.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
   return out;
 }

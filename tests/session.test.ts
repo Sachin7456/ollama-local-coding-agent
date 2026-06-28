@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
-import { Session, listSessions } from "../src/state/session.ts";
+import { Session, listSessions, validateAndRecoverCwd } from "../src/state/session.ts";
 import { OllamaClient } from "../src/model/ollamaClient.ts";
 import { runAgent } from "../src/agent/agent.ts";
 import { createDefaultRegistry } from "../src/tools/tools.ts";
@@ -83,6 +83,28 @@ test("listSessions reports saved sessions with a first-user snippet", () => {
 
 test("load throws for an unknown session", () => {
   assert.throws(() => Session.load("does-not-exist"), /Session not found/);
+});
+
+test("A3: listSessions(cwd) returns only THIS project's sessions", () => {
+  const projA = path.join(tmp, "alpha");
+  const projB = path.join(tmp, "beta");
+  const a = Session.create({ cwd: projA });
+  a.appendMessage({ role: "user", content: "alpha task" });
+  const b = Session.create({ cwd: projB });
+  b.appendMessage({ role: "user", content: "beta task" });
+  const inA = listSessions(projA);
+  assert.ok(inA.some((s) => s.id === a.id), "project A's session is listed for A");
+  assert.ok(!inA.some((s) => s.id === b.id), "project B's session is NOT listed for A");
+  // unfiltered still shows both
+  const all = listSessions();
+  assert.ok(all.some((s) => s.id === a.id) && all.some((s) => s.id === b.id));
+});
+
+test("A4: validateAndRecoverCwd keeps a real dir, falls back when it's gone", () => {
+  const keep = validateAndRecoverCwd(tmp, "/fallback");
+  assert.deepEqual(keep, { cwd: tmp, recovered: false });
+  const gone = validateAndRecoverCwd(path.join(tmp, "definitely-not-here-123"), tmp);
+  assert.deepEqual(gone, { cwd: tmp, recovered: true });
 });
 
 test("a session persisted via runAgent can be resumed and continued", async () => {
