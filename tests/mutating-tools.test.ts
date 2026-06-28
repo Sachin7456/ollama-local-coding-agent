@@ -14,6 +14,7 @@ import {
   createFullRegistry,
   resolveInside,
   sandboxPrefix,
+  psSandboxPrefix,
   ReadState,
   type ToolContext,
 } from "../src/tools/tools.ts";
@@ -174,6 +175,10 @@ test("sandboxPrefix parses QWEN_HARNESS_SANDBOX — empty by default (Layer 3 co
   assert.deepEqual(sandboxPrefix(), []); // unset → no wrapping (default behavior unchanged)
   process.env.QWEN_HARNESS_SANDBOX = "bwrap --unshare-net --bind . .";
   assert.deepEqual(sandboxPrefix(), ["bwrap", "--unshare-net", "--bind", ".", "."]);
+  // PowerShell is OS-native on Windows and can't run inside a POSIX/Linux sandbox → skip it there (run native);
+  // off-Windows `pwsh` still honors the sandbox.
+  assert.deepEqual(psSandboxPrefix("win32"), []);
+  assert.deepEqual(psSandboxPrefix("linux"), ["bwrap", "--unshare-net", "--bind", ".", "."]);
   if (saved === undefined) delete process.env.QWEN_HARNESS_SANDBOX;
   else process.env.QWEN_HARNESS_SANDBOX = saved;
 });

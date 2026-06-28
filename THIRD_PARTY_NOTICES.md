@@ -135,11 +135,13 @@ flowchart TD
 | `ollamaClient` | The only code that speaks the model's wire format | A single seam to swap the model backend without touching the loop |
 | `tools` | The tool interface, a registry, and built-in file/search tools | Capabilities are data the model is offered, not hard-coded calls |
 | `permissions` | An allow / ask / deny gate, plus a dangerous-command floor | Safety is enforced in one place, on every action |
+| `permissionsStore` | Persisted per-project "always allow" rules | The auto-approve set grows per project without code edits |
 | `agent` | The turn loop, argument validation/repair, loop guards | The orchestration logic, independent of any specific tool or model |
 | `gate` | A small async semaphore | Bounds how many model generations run at once |
 | `orchestrator` | A coordinator that delegates subtasks to worker agents | Multi-agent work reuses the same single-agent loop, one level deep |
 | `session` | Append-only transcript persistence + resume | Durability without a database; replay is trivial |
-| `memory` | Durable facts across separate conversations | Long-term recall, kept separate from a single session |
+| `memory` | Durable facts across separate conversations (per project) | Long-term recall, kept separate from a single session |
+| `projectRules` | Loads per-project conventions (`AGENTS.md` / `.qwen-harness.md`) into the prompt | Per-project guidance without code edits |
 | `compaction` | Summarize older turns as the context window fills | Keeps long runs inside small local context windows |
 | `preflight` | One-time startup checks with fix-it guidance | Fail clearly instead of crashing when prerequisites are missing |
 
@@ -172,6 +174,7 @@ qwen-harness/
 ├── src/                        # harness source (TypeScript, run directly by Node) — grouped by feature
 │   ├── cli/                    # entry + startup
 │   │   ├── main.ts             # CLI entry (REPL + one-shot)
+│   │   ├── repl.ts             # pure REPL helpers (input loop, prompt parsing, shell hint)
 │   │   ├── loadEnv.ts          # zero-dep .env loader
 │   │   └── preflight.ts        # one-time startup prerequisite checks
 │   ├── model/                  # model backend + registry
@@ -181,18 +184,21 @@ qwen-harness/
 │   │   ├── agent.ts            # the single-agent turn loop
 │   │   └── toolCallRecovery.ts # recover malformed / content-embedded tool calls
 │   ├── tools/                  # tool interface + built-ins
-│   │   └── tools.ts            # Tool interface, registry, read/grep/write/edit/multi_edit/bash
+│   │   └── tools.ts            # Tool interface, registry, read/grep/write/edit/multi_edit/find_files/bash/powershell
 │   ├── permissions/            # safety
-│   │   └── permissions.ts      # allow / ask / deny gate + dangerous-command floor
+│   │   ├── permissions.ts      # allow / ask / deny gate + dangerous-command floor
+│   │   └── permissionsStore.ts # persisted per-project "always allow" rules
 │   ├── orchestration/          # multi-agent + concurrency
 │   │   ├── orchestrator.ts     # multi-agent coordinator + worker delegation
 │   │   └── gate.ts             # async semaphore (concurrency cap)
 │   └── state/                  # persistence + context
-│       ├── session.ts          # append-only transcript persistence + resume
-│       ├── memory.ts           # long-term remember / recall
+│       ├── session.ts          # append-only transcript persistence + resume + per-project keys
+│       ├── memory.ts           # long-term remember / recall (per-project)
+│       ├── projectRules.ts     # load per-project conventions (AGENTS.md / .qwen-harness.md)
 │       └── compaction.ts       # context-window compaction
 ├── tests/                      # node:test suites (no model required)
 ├── scripts/                    # live smoke test against a real model
+├── Dockerfile                  # run the agent contained (the real boundary for destructive commands)
 ├── package.json                # zero dependencies
 ├── tsconfig.json
 ├── .env.example                # documents optional config (no secrets)
@@ -200,6 +206,7 @@ qwen-harness/
 ├── README.md
 ├── USER-GUIDE.md
 ├── CONTRIBUTING.md
+├── OPEN-PROBLEMS.md            # open problems / call for community help
 ├── THIRD_PARTY_NOTICES.md
 └── LICENSE
 ```

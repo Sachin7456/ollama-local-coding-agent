@@ -2,8 +2,9 @@
 //
 // Durable facts that survive across DIFFERENT chats (unlike a session, which is one
 // conversation). Implemented simply:
-//   - an append-only JSONL store under ~/.qwen-harness/memory.jsonl (override via
-//     QWEN_HARNESS_DIR — shared with sessions);
+//   - an append-only JSONL store, PER-PROJECT, at <harnessDir>/projects/<projectKey>/memory.jsonl
+//     (override the base via QWEN_HARNESS_DIR — shared with sessions). Per-project so a fact
+//     remembered while working in one project does not surface in an unrelated one.
 //   - two tools the model can call: remember(fact) and recall(query?);
 //   - recall injection: a "Known facts" block prepended to the system prompt on a
 //     fresh conversation; the recall tool fetches on demand mid-conversation.
@@ -13,7 +14,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { harnessDir } from "../state/session.ts";
+import { projectDir } from "../state/session.ts";
 import type { Tool } from "../tools/tools.ts";
 
 interface MemoryRecord {
@@ -21,24 +22,22 @@ interface MemoryRecord {
   ts: string;
 }
 
-function memoryFile(): string {
-  const dir = harnessDir();
-  fs.mkdirSync(dir, { recursive: true });
-  return path.join(dir, "memory.jsonl");
+function memoryFile(cwd: string): string {
+  return path.join(projectDir(cwd), "memory.jsonl");
 }
 
-/** Save a durable fact. Trims and ignores empties. */
-export function addMemory(text: string): boolean {
+/** Save a durable fact for THIS project. Trims and ignores empties. */
+export function addMemory(text: string, cwd: string): boolean {
   const fact = text.trim();
   if (!fact) return false;
   const rec: MemoryRecord = { text: fact, ts: new Date().toISOString() };
-  fs.appendFileSync(memoryFile(), JSON.stringify(rec) + "\n");
+  fs.appendFileSync(memoryFile(cwd), JSON.stringify(rec) + "\n");
   return true;
 }
 
-/** All saved facts, oldest first. */
-export function getMemories(): string[] {
-  const file = memoryFile();
+/** All saved facts for THIS project, oldest first. */
+export function getMemories(cwd: string): string[] {
+  const file = memoryFile(cwd);
   if (!fs.existsSync(file)) return [];
   const out: string[] = [];
   for (const line of fs.readFileSync(file, "utf8").split("\n")) {
@@ -54,15 +53,15 @@ export function getMemories(): string[] {
 }
 
 /** Facts containing the query (case-insensitive); all facts if no query. */
-export function searchMemories(query?: string): string[] {
-  const all = getMemories();
+export function searchMemories(query: string | undefined, cwd: string): string[] {
+  const all = getMemories(cwd);
   const q = (query ?? "").trim().toLowerCase();
   return q ? all.filter((f) => f.toLowerCase().includes(q)) : all;
 }
 
-/** For tests: wipe the store. */
-export function clearMemories(): void {
-  const file = memoryFile();
+/** For tests: wipe THIS project's store. */
+export function clearMemories(cwd: string): void {
+  const file = memoryFile(cwd);
   if (fs.existsSync(file)) fs.rmSync(file);
 }
 
@@ -72,14 +71,14 @@ const MEMORY_STOPWORDS = new Set([
 ]);
 
 /**
- * A "Known facts" block to prepend to a fresh system prompt (empty if none).
+ * A "Known facts" block to prepend to a fresh system prompt (empty if none) for THIS project.
  *
  * Dedupes facts (case-insensitive, latest wins) and injects only the top-K, ranked by
  * relevance to `query` (keyword overlap) blended with recency. With no query it falls back
  * to the most-recent top-K. Keeps the prompt focused as the memory store grows.
  */
-export function buildMemoryBlock(query?: string, topK = 12): string {
-  const all = getMemories(); // oldest -> newest
+export function buildMemoryBlock(cwd: string, query?: string, topK = 12): string {
+  const all = getMemories(cwd); // oldest -> newest
   if (all.length === 0) return "";
 
   // Dedupe case-insensitively, keeping the latest occurrence (text + recency order).
@@ -131,9 +130,9 @@ export const rememberTool: Tool = {
     required: ["fact"],
     additionalProperties: false,
   },
-  async execute(args) {
+  async execute(args, ctx) {
     const fact = typeof args.fact === "string" ? args.fact : "";
-    return addMemory(fact) ? `Remembered: ${fact.trim()}` : "Error: 'fact' must be a non-empty string.";
+    return addMemory(fact, ctx.cwd) ? `Remembered: ${fact.trim()}` : "Error: 'fact' must be a non-empty string.";
   },
 };
 
@@ -148,9 +147,9 @@ export const recallTool: Tool = {
     required: [],
     additionalProperties: false,
   },
-  async execute(args) {
+  async execute(args, ctx) {
     const query = typeof args.query === "string" ? args.query : undefined;
-    const hits = searchMemories(query);
+    const hits = searchMemories(query, ctx.cwd);
     if (hits.length === 0) return query ? `No remembered facts match "${query}".` : "No facts remembered yet.";
     return hits.map((f) => `- ${f}`).join("\n");
   },

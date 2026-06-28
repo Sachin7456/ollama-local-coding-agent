@@ -17,7 +17,7 @@ import { loadPermissionRules, rememberAllowRule } from "../permissions/permissio
 import { runAgent, type AgentEvent, type AskInfo } from "../agent/agent.ts";
 import { resolveModel, resolveWorkerModel, fileRegistryModels, getModels, OLLAMA_BASE_URL } from "../model/config.ts";
 import { preflight, formatPreflight } from "../cli/preflight.ts";
-import { interruptAction, shellGuidance, parseAskReply } from "../cli/repl.ts";
+import { interruptAction, shellGuidance, parseAskReply, runLines } from "../cli/repl.ts";
 import { Semaphore } from "../orchestration/gate.ts";
 import { runOrchestrator } from "../orchestration/orchestrator.ts";
 import { Session, listSessions } from "../state/session.ts";
@@ -165,8 +165,6 @@ async function main(): Promise<void> {
   // Windows: add the PowerShell shell tool (the model is steered to it via the system prompt).
   if (process.platform === "win32") registry.register(powershellTool);
   const permissions = createDefaultPermissions(args.mode);
-  // Grow the auto-allow set from this user's "always allow" history (persisted rules).
-  for (const r of loadPermissionRules()) permissions.addAllowRule(r);
   const ctx: ToolContext = { cwd: process.cwd(), readState: new ReadState() };
   let activeModel = model.name;
   // Worker model for multi-agent — REGISTRY-DRIVEN (works with any installed model, not hardcoded).
@@ -190,6 +188,9 @@ async function main(): Promise<void> {
       const opened = Session.open(args.resume);
       session = opened.session;
       history = opened.messages;
+      // Resume in the session's ORIGINAL project dir so file tools, approvals, AND memory all use the right
+      // project — not wherever `--resume` happened to be launched from.
+      if (session.meta.cwd) ctx.cwd = session.meta.cwd;
       console.log(`resumed session ${session.id} (${history.length} messages)`);
     } catch (e) {
       console.error(`⛔ ${(e as Error).message}`);
@@ -198,6 +199,10 @@ async function main(): Promise<void> {
   } else {
     session = Session.create({ model: activeModel, cwd: ctx.cwd });
   }
+
+  // Grow the auto-allow set from THIS PROJECT's "always allow" history (per-project; after any --resume has set
+  // ctx.cwd to the session's project above) — persisted, never global.
+  for (const r of loadPermissionRules(ctx.cwd)) permissions.addAllowRule(r);
 
   const rl = readline.createInterface({ input: stdin, output: stdout });
 
@@ -222,7 +227,7 @@ async function main(): Promise<void> {
       const cmd = typeof info.args.command === "string" ? info.args.command.trim() : "";
       if (cmd && (info.toolName === "bash" || info.toolName === "powershell")) {
         permissions.addAllowRule({ tool: info.toolName, decision: "allow", commandPrefix: cmd, reason: "remembered (always allow)" });
-        rememberAllowRule(info.toolName, cmd);
+        rememberAllowRule(info.toolName, cmd, ctx.cwd);
         console.log(`  (remembered — will auto-allow ${info.toolName} commands starting with "${cmd}")`);
       }
     }
@@ -258,7 +263,7 @@ async function main(): Promise<void> {
     const priorMessages = history.length > 0 ? history : undefined;
     const onMessage = (m: ChatMessage): void => session.appendMessage(m);
     const compaction = { numCtx: resolveModel(activeModel).numCtx, threshold: 0.75, keepRecent: 8, toolResultCap: 2000 };
-    const memBlock = buildMemoryBlock(text);
+    const memBlock = buildMemoryBlock(ctx.cwd, text);
     const projectRules = loadProjectRules(ctx.cwd); // optional ./AGENTS.md / .qwen-harness.md project conventions
     const base = [SYSTEM_PROMPT, memBlock, projectRules].filter(Boolean).join("\n\n");
     const sysPrompt = `${base}\n\n${shellGuidance(process.platform)}\n\n${CRITICAL_RULES}`; // critical rules LAST (recency for small models)
@@ -318,6 +323,78 @@ async function main(): Promise<void> {
     return;
   }
 
+  // One handler for a single line of REPL input — shared by the interactive loop AND the non-interactive
+  // (piped/pasted) path so both dispatch slash-commands and tasks identically. Returns false to end the session.
+  const processInput = async (input: string): Promise<boolean> => {
+    if (!input) return true;
+    if (input === "/exit" || input === "/quit") return false;
+    if (input === "/perms") {
+      const rules = loadPermissionRules(ctx.cwd);
+      if (rules.length === 0) console.log("no remembered 'always allow' rules yet (press 'a' at a permission prompt to add one).");
+      else for (const r of rules) console.log(`  ${r.tool}: ${r.commandPrefix}`);
+      return true;
+    }
+    if (input === "/models") {
+      console.log(`configured: ${Object.keys(getModels()).join(", ")}`);
+      try {
+        const installed = await client.listModels();
+        console.log(`installed in Ollama: ${installed.length ? installed.join(", ") : "(none)"}`);
+      } catch (e) {
+        console.log(`(couldn't query Ollama: ${(e as Error).message})`);
+      }
+      return true;
+    }
+    if (input === "/sessions") {
+      for (const s of listSessions()) console.log(`${s.id}  ${s.createdAt}  (${s.messages} msgs)  ${s.firstUser}`);
+      return true;
+    }
+    if (input === "/new") {
+      session = Session.create({ model: activeModel, cwd: ctx.cwd });
+      history = [];
+      console.log(`started new session ${session.id}`);
+      return true;
+    }
+    if (input.startsWith("/model ")) {
+      const tag = input.slice("/model ".length).trim();
+      if (getModels()[tag]) {
+        activeModel = tag;
+        console.log(`switched model -> ${tag}`);
+      } else {
+        console.log(`unknown model "${tag}". Known: ${Object.keys(getModels()).join(", ")}`);
+      }
+      return true;
+    }
+    if (input.startsWith("/mode ")) {
+      const m = input.slice("/mode ".length).trim();
+      if (!isPermissionMode(m)) {
+        console.log(`unknown mode "${m}". Valid: ${PERMISSION_MODES.join(", ")}`);
+        return true;
+      }
+      permissions.setMode(m);
+      console.log(`mode -> ${permissions.mode}`);
+      return true;
+    }
+    if (input.startsWith("/")) {
+      console.log(`unknown command "${input.split(" ")[0]}". commands: /exit  /model <tag>  /mode <mode>  /models  /perms  /sessions  /new`);
+      return true;
+    }
+    try {
+      await runTask(input);
+    } catch (e) {
+      console.error(`Error: ${(e as Error).message}`);
+    }
+    return true;
+  };
+
+  // Non-interactive (piped / pasted stdin): run EVERY line in order. Iterating the readline interface applies
+  // backpressure, so a long-running task can't drop the lines queued behind it (the old single-question loop
+  // processed only the first piped line). No prompt/banner in this mode.
+  if (!stdin.isTTY) {
+    await runLines(rl, processInput);
+    rl.close();
+    return;
+  }
+
   // Interactive REPL.
   const modeLabel = args.multi ? `multi-agent (orch=${activeModel}, worker=${workerModel}, cap=2)` : `single (${activeModel})`;
   console.log(`qwen-harness  —  ${modeLabel}  |  perms: ${permissions.mode}  |  cwd: ${ctx.cwd}`);
@@ -332,63 +409,7 @@ async function main(): Promise<void> {
       console.log("\n(input closed — exiting)");
       break;
     }
-    if (!input) continue;
-    if (input === "/exit" || input === "/quit") break;
-    if (input === "/perms") {
-      const rules = loadPermissionRules();
-      if (rules.length === 0) console.log("no remembered 'always allow' rules yet (press 'a' at a permission prompt to add one).");
-      else for (const r of rules) console.log(`  ${r.tool}: ${r.commandPrefix}`);
-      continue;
-    }
-    if (input === "/models") {
-      console.log(`configured: ${Object.keys(getModels()).join(", ")}`);
-      try {
-        const installed = await client.listModels();
-        console.log(`installed in Ollama: ${installed.length ? installed.join(", ") : "(none)"}`);
-      } catch (e) {
-        console.log(`(couldn't query Ollama: ${(e as Error).message})`);
-      }
-      continue;
-    }
-    if (input === "/sessions") {
-      for (const s of listSessions()) console.log(`${s.id}  ${s.createdAt}  (${s.messages} msgs)  ${s.firstUser}`);
-      continue;
-    }
-    if (input === "/new") {
-      session = Session.create({ model: activeModel, cwd: ctx.cwd });
-      history = [];
-      console.log(`started new session ${session.id}`);
-      continue;
-    }
-    if (input.startsWith("/model ")) {
-      const tag = input.slice("/model ".length).trim();
-      if (getModels()[tag]) {
-        activeModel = tag;
-        console.log(`switched model -> ${tag}`);
-      } else {
-        console.log(`unknown model "${tag}". Known: ${Object.keys(getModels()).join(", ")}`);
-      }
-      continue;
-    }
-    if (input.startsWith("/mode ")) {
-      const m = input.slice("/mode ".length).trim();
-      if (!isPermissionMode(m)) {
-        console.log(`unknown mode "${m}". Valid: ${PERMISSION_MODES.join(", ")}`);
-        continue;
-      }
-      permissions.setMode(m);
-      console.log(`mode -> ${permissions.mode}`);
-      continue;
-    }
-    if (input.startsWith("/")) {
-      console.log(`unknown command "${input.split(" ")[0]}". commands: /exit  /model <tag>  /mode <mode>  /models  /perms  /sessions  /new`);
-      continue;
-    }
-    try {
-      await runTask(input);
-    } catch (e) {
-      console.error(`Error: ${(e as Error).message}`);
-    }
+    if (!(await processInput(input))) break;
   }
   rl.close();
 }

@@ -10,7 +10,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import type { ChatMessage } from "../model/ollamaClient.ts";
 
 export interface SessionMeta {
@@ -30,6 +30,33 @@ export interface SessionSummary {
 /** Base dir for harness state. Override with QWEN_HARNESS_DIR (used by tests). */
 export function harnessDir(): string {
   return process.env.QWEN_HARNESS_DIR ?? path.join(os.homedir(), ".qwen-harness");
+}
+
+/** Nearest ancestor containing a `.git` entry (the project/repo root), or null. */
+function gitRootOf(cwd: string): string | null {
+  let dir = path.resolve(cwd);
+  for (let i = 0; i < 64; i++) {
+    if (fs.existsSync(path.join(dir, ".git"))) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
+
+export function projectKey(cwd: string): string {
+  const root = gitRootOf(cwd) ?? path.resolve(cwd);
+  const base = (path.basename(root).replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 40)) || "project";
+  const hash = createHash("sha1").update(root).digest("hex").slice(0, 8);
+  return `${base}-${hash}`;
+}
+
+/** Per-project state dir under the harness dir (created on demand): <harnessDir>/projects/<projectKey>. */
+export function projectDir(cwd: string): string {
+  const dir = path.join(harnessDir(), "projects", projectKey(cwd));
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
 }
 
 export function sessionsDir(): string {

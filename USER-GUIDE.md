@@ -51,15 +51,16 @@ thinks with your local AI, and **never sends a single byte to the internet**.
 - **Remember useful facts between chats** — tell it something worth keeping and it
   will bring that fact back in later, separate conversations.
 - **Keep you in control** — it **asks first** before editing a file or running a
-  command, and it **refuses outright** anything clearly destructive (such as wiping
-  your drive).
+  command, and a built-in floor blocks the most destructive commands (such as wiping
+  your drive) — best-effort, not a guarantee (see "Running contained").
 - **Stay completely offline** — no internet, no sign-in, no cloud service.
 
 ### Not part of it (yet)
 
 - Reading web pages or searching online.
-- An extra operating-system "locked box" around the AI. (Instead it relies on the
-  permission checks described below, which already stop risky actions.)
+- A *built-in / automatic* operating-system "locked box" around the AI. The permission checks below are
+  always on; for full OS-level isolation you run the tool **contained** yourself — a ready Docker setup ships
+  with it (see "Running contained" below), strongly recommended for `acceptEdits` / `bypass`.
 
 ---
 
@@ -297,9 +298,11 @@ Or switch while chatting:
 ```
 /mode acceptEdits
 ```
-The built-in block for the most destructive commands stays on in every mode — but treat it as a
-safety net, not a guarantee. For real isolation (especially with `acceptEdits` / `bypass`), run the
-tool **contained**.
+**Always-on vs optional.** The permission gate, the destructive-command floor, and the loop/circuit breakers
+are **always on, in every mode**. OS-level **containment is optional** — and it is the only real boundary.
+Treat the command floor as a best-effort *tripwire*, NOT a guarantee: it cannot catch every form (e.g.
+`rm -rf /etc`, `rm -rf .`, a bare `*`, or base64-encoded / `bash -c`-wrapped commands). For real isolation
+(especially with `acceptEdits` / `bypass`), run the tool **contained**.
 
 **Running contained (the real safety guarantee).** No command allow/deny list can be perfect — the durable
 way to keep the agent off the rest of your machine is to run the whole tool inside a container, so even an
@@ -317,12 +320,18 @@ way to keep the agent off the rest of your machine is to run the whole tool insi
   Inside the container even `rm -rf` can only touch your mounted project — never your host. This is also
   the real defense against prompt-injection: a malicious file can't make the agent escape the container.
 - **WSL2 (Windows):** run inside a WSL2 shell scoped to your project for the same effect.
-- **A sandbox wrapper (Linux/macOS):** set `QWEN_HARNESS_SANDBOX` to a sandbox command and every shell
+- **A sandbox wrapper (Linux/macOS):** set `QWEN_HARNESS_SANDBOX` to a sandbox command and every **bash**
   command runs inside it — e.g. `QWEN_HARNESS_SANDBOX="bwrap --ro-bind / / --bind . . --unshare-net"`
-  (bubblewrap) or a `sandbox-exec -f profile.sb` profile (macOS). Unset = normal behavior.
+  (bubblewrap) or a `sandbox-exec -f profile.sb` profile (macOS). Unset = normal behavior. On Windows this
+  hook does **not** wrap PowerShell (a native Windows shell can't run inside a Linux sandbox) — use Docker or
+  WSL2 for real Windows containment.
 
 **Project conventions.** Drop an `AGENTS.md` or `.qwen-harness.md` in your project with rules (e.g. "answer
 in French", "use tabs, not spaces") and the tool loads them into every prompt for that project.
+
+**Per-project state.** Your "always allow" approvals and the assistant's long-term memory are kept
+**per-project** (stored under your home dir, keyed by the project folder) — so an approval or a remembered
+fact from one project never carries into another.
 
 ---
 

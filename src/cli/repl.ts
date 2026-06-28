@@ -32,3 +32,13 @@ export function parseAskReply(input: string): "once" | "always" | "no" {
   if (s === "a" || s === "always") return "always";
   return "no";
 }
+
+
+export async function runLines(
+  lines: AsyncIterable<string>,
+  handle: (line: string) => Promise<boolean>,
+): Promise<void> {
+  for await (const raw of lines) {
+    if (!(await handle(raw.trim()))) break;
+  }
+}

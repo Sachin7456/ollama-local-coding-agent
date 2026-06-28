@@ -18,4 +18,5 @@ WORKDIR /app
 COPY package.json ./
 COPY src ./src
 ENV OLLAMA_BASE_URL=http://host.docker.internal:11434
-ENTRYPOINT ["node", "--experimental-strip-types", "src/cli/main.ts"]
+
+ENTRYPOINT ["node", "--experimental-strip-types", "/app/src/cli/main.ts"]

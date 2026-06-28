@@ -701,9 +701,14 @@ function runShell(command: string, cwd: string, timeoutMs: number): Promise<Exec
 // ships with Windows; pwsh (7+) is the cross-platform binary used off-Windows.
 const POWERSHELL_BIN = process.platform === "win32" ? "powershell.exe" : "pwsh";
 
+
+export function psSandboxPrefix(platform: string): string[] {
+  return platform === "win32" ? [] : sandboxPrefix();
+}
+
 function runPowerShell(command: string, cwd: string, timeoutMs: number): Promise<ExecResult> {
   const opts = { cwd, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024, windowsHide: true };
-  const box = sandboxPrefix();
+  const box = psSandboxPrefix(process.platform);
   const psArgs = ["-NoProfile", "-NonInteractive", "-Command", command];
   return new Promise((resolve) => {
     if (box.length) {
