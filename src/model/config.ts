@@ -38,6 +38,28 @@ export interface ModelConfig {
   sampling: SamplingParams;
   /** Rough on-disk size (GB) for capacity and concurrency planning. */
   approxSizeGB: number;
+  // ---- optional provider routing (default = local Ollama; omit = ollama, fully backward-compatible) ----
+  /** Name of a `connections` entry this model uses (e.g. "groq-work"). Default: the `local` (Ollama) connection. */
+  connection?: string;
+  /** Inline override (instead of `connection`): which client. "ollama" | "compat" (the standard
+   *  /v1/chat/completions API — Groq, Cerebras, OpenRouter, vLLM, llama.cpp, LM Studio, ...). */
+  provider?: "ollama" | "compat";
+  /** Inline override: base URL for this model's endpoint (ends in /v1 for compat). Defaults to OLLAMA_BASE_URL. */
+  baseUrl?: string;
+  /** Inline override: env var holding the API key (e.g. "GROQ_API_KEY"). Local Ollama needs none. */
+  apiKeyEnv?: string;
+  /** Provider's advertised context window (tokens), used for compaction when it differs from numCtx. */
+  contextWindow?: number;
+}
+
+/** A named connection to a model endpoint + account. Models reference one by name (`ModelConfig.connection`).
+ *  Defining the SAME API type under several names (different `apiKeyEnv`) lets one harness use multiple accounts. */
+export interface Connection {
+  /** "ollama" (local, native /api/chat) | "compat" (the standard /v1/chat/completions API). */
+  type: "ollama" | "compat";
+  baseUrl: string;
+  /** Env var holding the API key (e.g. "GROQ_PERSONAL"). Local Ollama needs none. */
+  apiKeyEnv?: string;
 }
 
 export interface HarnessConfig {
@@ -85,6 +107,14 @@ export const DEFAULT_MODEL = "qwen2.5-coder:7b";
 /** Ollama server URL. Override with OLLAMA_BASE_URL. 127.0.0.1 (not localhost) to avoid IPv6 surprises. */
 export const OLLAMA_BASE_URL =
   process.env.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434";
+
+/** The connection a model uses when it names none. */
+export const DEFAULT_CONNECTION = "local";
+
+/** Builtin named connections. `local` points at the Ollama server; users add more via the file source. */
+export const CONNECTIONS: Record<string, Connection> = {
+  local: { type: "ollama", baseUrl: OLLAMA_BASE_URL },
+};
 
 // ---- model source toggle: "builtin" (fast default) vs "file" (user-editable) ----
 
@@ -189,11 +219,95 @@ export function resolveWorkerModel(requested?: string): ModelConfig {
 }
 
 /**
+ * The resolved model TAG (registry key) — same precedence as resolveModel, but returns the KEY, not the config.
+ * Needed because a tag and the model's `name` differ for compat models (e.g. tag "gpt-oss-120b" vs a
+ * provider-prefixed wire name); routing/compaction/clientFor all key by TAG, so the active model must be a tag.
+ */
+export function resolveModelTag(requested?: string): string {
+  const models = getModels();
+  const tag = requested ?? process.env.HARNESS_MODEL ?? defaultModelFor(models);
+  return models[tag] ? tag : defaultModelFor(models);
+}
+
+/** The worker model TAG for multi-agent mode — mirrors resolveWorkerModel() but returns the registry key. */
+export function resolveWorkerModelTag(requested?: string): string {
+  const models = getModels();
+  if (requested && models[requested]) return requested;
+  const cfg = resolveWorkerModel(requested);
+  const tag =
+    Object.keys(models).find((k) => models[k] === cfg) ?? Object.keys(models).find((k) => models[k].name === cfg.name);
+  return tag ?? defaultModelFor(models);
+}
+
+/**
  * When the model source is "file", the model tags declared in that file (else []).
  * Used at startup to warn about models a user listed but hasn't pulled.
  */
 export function fileRegistryModels(): string[] {
   return modelSource() === "file" ? Object.keys(getModels()) : [];
+}
+
+// ---- named connections (provider / account routing) ----
+
+const fileConnCache = new Map<string, Record<string, Connection>>();
+
+function isValidConnections(v: unknown): v is Record<string, Connection> {
+  if (!v || typeof v !== "object") return false;
+  return Object.values(v as Record<string, unknown>).every((e) => {
+    const c = e as Partial<Connection>;
+    return Boolean(c) && (c.type === "ollama" || c.type === "compat") && typeof c.baseUrl === "string";
+  });
+}
+
+/** Guarantee a `local` (Ollama) connection so models without one always resolve. */
+function withLocal(conns: Record<string, Connection>): Record<string, Connection> {
+  return conns.local ? conns : { local: { type: "ollama", baseUrl: OLLAMA_BASE_URL }, ...conns };
+}
+
+/**
+ * The active connection registry. "builtin" → in-memory CONNECTIONS. "file" → the file's `connections` block
+ * (cached); a missing block is fine (just `local`), an invalid one warns + falls back to `local`. A duplicate
+ * connection name in the file resolves to the LAST (standard JSON.parse behavior).
+ */
+export function getConnections(): Record<string, Connection> {
+  if (modelSource() === "builtin") return withLocal(CONNECTIONS);
+  const file = path.resolve(modelsFilePath());
+  const cached = fileConnCache.get(file);
+  if (cached) return cached;
+  let result = withLocal(CONNECTIONS);
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as { connections?: unknown };
+    if (parsed.connections === undefined) {
+      result = withLocal(CONNECTIONS); // file declares only models → just the local connection
+    } else if (isValidConnections(parsed.connections)) {
+      result = withLocal(parsed.connections);
+    } else {
+      console.error(`[config] ${file} has an invalid "connections" block — using only the local connection.`);
+    }
+  } catch {
+    /* unreadable file → just local (getModels already warns about the file) */
+  }
+  fileConnCache.set(file, result);
+  return result;
+}
+
+/** Resolve a connection by name (default `local`). Throws on an unknown name so typos fail loudly. */
+export function resolveConnection(name?: string): Connection {
+  const conns = getConnections();
+  const key = name ?? DEFAULT_CONNECTION;
+  const conn = conns[key];
+  if (!conn) throw new Error(`Unknown connection "${key}". Known: ${Object.keys(conns).join(", ")}.`);
+  return conn;
+}
+
+/** Effective endpoint routing for a model tag: inline override > its `connection` > the default `local`. */
+export function resolveRouting(tag: string): { type: "ollama" | "compat"; baseUrl: string; apiKeyEnv?: string } {
+  const cfg = getModels()[tag];
+  if (cfg?.provider || cfg?.baseUrl) {
+    return { type: cfg.provider ?? "ollama", baseUrl: cfg.baseUrl ?? OLLAMA_BASE_URL, apiKeyEnv: cfg.apiKeyEnv };
+  }
+  const conn = resolveConnection(cfg?.connection);
+  return { type: conn.type, baseUrl: conn.baseUrl, apiKeyEnv: conn.apiKeyEnv };
 }
 
 /** Build the full harness config, with an optional model override. */

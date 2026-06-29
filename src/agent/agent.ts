@@ -9,7 +9,8 @@
 //   else for each tool_call: validate args -> permission decide -> run/deny/ask
 //   -> append tool results -> next turn, until DONE / maxTurns / circuit-breaker.
 
-import { OllamaClient, type ChatMessage, type ToolCall, type ChatResult } from "../model/ollamaClient.ts";
+import { type ChatMessage, type ToolCall, type ChatResult } from "../model/ollamaClient.ts";
+import type { ModelClient } from "../model/modelClient.ts";
 import { ToolRegistry, type ToolContext } from "../tools/tools.ts";
 import { PermissionEngine, requestFromTool, type PermissionDecision } from "../permissions/permissions.ts";
 import { recoverToolCallsFromContent, stripThink } from "../agent/toolCallRecovery.ts";
@@ -31,7 +32,7 @@ export type AgentEvent =
   | { type: "done"; reason: string; turns: number };
 
 export interface RunAgentOptions {
-  client: OllamaClient;
+  client: ModelClient;
   registry: ToolRegistry;
   permissions: PermissionEngine;
   ctx: ToolContext;
@@ -88,6 +89,7 @@ const LOOP_WARNING =
 type DenialEffect = "reset" | "increment" | "none";
 
 interface ResolvedToolCall {
+  id: string; // the originating tool_call id — links this result back to its call (required by /v1 providers)
   name: string;
   args: Record<string, unknown>;
   readOnly: boolean; // false when the tool is unknown -> never joins the read-only batch
@@ -212,7 +214,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentResult> {
       const name = call.function.name;
       const args = call.function.arguments ?? {};
       const tool = opts.registry.get(name);
-      const base = { name, args, readOnly: false, needsDispatch: false };
+      const base = { id: call.id, name, args, readOnly: false, needsDispatch: false };
       if (!tool) {
         const content = `Error: unknown tool "${name}". Available: ${opts.registry.list().map((t) => t.name).join(", ")}.`;
         return { ...base, decision: "deny", content, effect: "none" };
@@ -224,12 +226,12 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentResult> {
       }
       const verdict = opts.permissions.decide(requestFromTool(tool, args));
       if (verdict.decision === "allow") {
-        return { name, args, readOnly: tool.readOnly, decision: "allow", needsDispatch: true, content: "", effect: "reset" };
+        return { id: call.id, name, args, readOnly: tool.readOnly, decision: "allow", needsDispatch: true, content: "", effect: "reset" };
       }
       if (verdict.decision === "ask") {
         const approved = opts.onAsk ? await opts.onAsk({ toolName: name, args, reason: verdict.reason }) : false;
         if (approved) {
-          return { name, args, readOnly: tool.readOnly, decision: "allow", needsDispatch: true, content: "", effect: "reset" };
+          return { id: call.id, name, args, readOnly: tool.readOnly, decision: "allow", needsDispatch: true, content: "", effect: "reset" };
         }
         return { ...base, decision: "deny", content: `Permission denied by the user for ${name}. Do not retry; choose another approach.`, effect: "increment" };
       }
@@ -246,7 +248,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentResult> {
       const r = await resolveOne(toolCalls[0]);
       applyEffect(r.effect);
       if (r.needsDispatch) r.content = await opts.registry.dispatch(r.name, r.args, opts.ctx);
-      record({ role: "tool", content: r.content, tool_name: r.name });
+      record({ role: "tool", content: r.content, tool_name: r.name, tool_call_id: r.id });
       emit({ type: "tool_result", tool: r.name, decision: r.decision, content: r.content, turn });
     } else {
       // Phase A: resolve every call in order (validation, permission, onAsk, denial effect).
@@ -268,7 +270,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentResult> {
       }
       // Phase C: record + emit in the ORIGINAL tool_calls order.
       for (const r of resolved) {
-        record({ role: "tool", content: r.content, tool_name: r.name });
+        record({ role: "tool", content: r.content, tool_name: r.name, tool_call_id: r.id });
         emit({ type: "tool_result", tool: r.name, decision: r.decision, content: r.content, turn });
       }
     }

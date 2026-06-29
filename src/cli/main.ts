@@ -10,12 +10,12 @@
 import "../cli/loadEnv.ts"; // MUST be first: load .env into process.env before config is read
 import readline from "node:readline/promises";
 import { stdin, stdout } from "node:process";
-import { OllamaClient } from "../model/ollamaClient.ts";
+import { clientFor } from "../model/clientFactory.ts";
 import { createFullRegistry, powershellTool, ReadState, type ToolContext } from "../tools/tools.ts";
 import { createDefaultPermissions, isPermissionMode, PERMISSION_MODES, type PermissionMode } from "../permissions/permissions.ts";
 import { loadPermissionRules, rememberAllowRule } from "../permissions/permissionsStore.ts";
 import { runAgent, type AgentEvent, type AskInfo } from "../agent/agent.ts";
-import { resolveModel, resolveWorkerModel, fileRegistryModels, getModels, OLLAMA_BASE_URL } from "../model/config.ts";
+import { resolveModel, resolveModelTag, resolveWorkerModelTag, resolveRouting, fileRegistryModels, getModels, OLLAMA_BASE_URL } from "../model/config.ts";
 import { preflight, formatPreflight, checkMemoryHeadroom } from "../cli/preflight.ts";
 import { interruptAction, shellGuidance, parseAskReply, runLines, isCommandLine } from "../cli/repl.ts";
 import { Semaphore } from "../orchestration/gate.ts";
@@ -159,7 +159,6 @@ async function main(): Promise<void> {
       process.exit(1);
     }
   })();
-  const client = new OllamaClient();
   const registry = createFullRegistry()
     .register(rememberTool)
     .register(recallTool);
@@ -167,19 +166,34 @@ async function main(): Promise<void> {
   if (process.platform === "win32") registry.register(powershellTool);
   const permissions = createDefaultPermissions(args.mode);
   const ctx: ToolContext = { cwd: process.cwd(), readState: new ReadState() };
-  let activeModel = model.name;
+  // activeModel + workerModel are TAGS (registry keys), not names — routing/compaction/clientFor all key by tag,
+  // and a compat tag (e.g. "gpt-oss-120b") can differ from its provider-prefixed wire name.
+  let activeModel = resolveModelTag(args.model);
   // Worker model for multi-agent — REGISTRY-DRIVEN (works with any installed model, not hardcoded).
-  const workerModel = resolveWorkerModel(args.worker).name;
+  const workerModel = resolveWorkerModelTag(args.worker);
 
   // One-time preflight: verify prerequisites (Node, Ollama, required models) with
   // actionable guidance. Runs ONCE at startup only — no per-turn latency.
   const requiredModels = args.multi ? [...new Set([activeModel, workerModel])] : [activeModel];
-  const pf = await preflight({ baseUrl: OLLAMA_BASE_URL, requiredModels, optionalModels: fileRegistryModels() });
-  if (!pf.ok) {
-    console.error(formatPreflight(pf));
-    process.exit(1);
+  // Only OLLAMA-routed models must be pulled in the local Ollama server; compat (remote /v1) models are validated
+  // by their provider at call time. Skip the Ollama preflight entirely if every active model is remote.
+  const isOllamaTag = (t: string): boolean => {
+    try {
+      return resolveRouting(t).type === "ollama";
+    } catch {
+      return false;
+    }
+  };
+  const requiredOllamaNames = requiredModels.filter(isOllamaTag).map((t) => resolveModel(t).name);
+  if (requiredOllamaNames.length > 0) {
+    const optionalOllamaNames = fileRegistryModels().filter(isOllamaTag).map((t) => resolveModel(t).name);
+    const pf = await preflight({ baseUrl: OLLAMA_BASE_URL, requiredModels: requiredOllamaNames, optionalModels: optionalOllamaNames });
+    if (!pf.ok) {
+      console.error(formatPreflight(pf));
+      process.exit(1);
+    }
+    for (const w of pf.warnings) console.warn(`⚠️  ${w}`);
   }
-  for (const w of pf.warnings) console.warn(`⚠️  ${w}`);
   // A2: multi-agent loads two models at once — warn (don't block) if they likely won't fit in RAM together.
   if (args.multi) {
     const memWarn = checkMemoryHeadroom(requiredModels, getModels());
@@ -278,6 +292,7 @@ async function main(): Promise<void> {
   process.on("SIGINT", handleInterrupt);
 
   async function runTask(text: string): Promise<void> {
+    const client = clientFor(activeModel); // resolve per task so a `/model` switch (even cloud<->local) picks the right client
     const priorMessages = history.length > 0 ? history : undefined;
     const onMessage = (m: ChatMessage): void => session.appendMessage(m);
     const compaction = { numCtx: resolveModel(activeModel).numCtx, threshold: 0.75, keepRecent: 8, toolResultCap: 2000 };
@@ -358,7 +373,7 @@ async function main(): Promise<void> {
       if (input === "/models") {
         console.log(`configured: ${Object.keys(getModels()).join(", ")}`);
         try {
-          const installed = await client.listModels();
+          const installed = await clientFor(activeModel).listModels();
           console.log(`installed in Ollama: ${installed.length ? installed.join(", ") : "(none)"}`);
         } catch (e) {
           console.log(`(couldn't query Ollama: ${(e as Error).message})`);

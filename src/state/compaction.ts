@@ -12,7 +12,8 @@
 // IMPORTANT: compaction rewrites only the IN-MEMORY messages sent to the model.
 // The session transcript stays a full append-only log (see session.ts).
 
-import { OllamaClient, type ChatMessage } from "../model/ollamaClient.ts";
+import { type ChatMessage } from "../model/ollamaClient.ts";
+import type { ModelClient } from "../model/modelClient.ts";
 import { Semaphore } from "../orchestration/gate.ts";
 
 export interface CompactionOptions {
@@ -108,12 +109,52 @@ export interface CompactionResult {
   summarized: number; // how many messages were folded into the summary
 }
 
+/** Map each tool_call id → its assistant index + its result index (-1 = no result yet / orphaned). */
+function findToolPairs(messages: ChatMessage[]): Map<string, { callIdx: number; resultIdx: number }> {
+  const pairs = new Map<string, { callIdx: number; resultIdx: number }>();
+  for (let i = 0; i < messages.length; i++) {
+    const tc = messages[i].tool_calls;
+    if (messages[i].role === "assistant" && tc && tc.length) {
+      for (const c of tc) pairs.set(c.id, { callIdx: i, resultIdx: -1 });
+    }
+  }
+  for (let i = 0; i < messages.length; i++) {
+    const id = messages[i].tool_call_id;
+    if (messages[i].role === "tool" && id) {
+      const p = pairs.get(id);
+      if (p) p.resultIdx = i;
+    }
+  }
+  return pairs;
+}
+
+/**
+ * Push `tailStart` forward until no tool_call↔result pair straddles it — so the kept tail never holds a tool
+ * result whose assistant tool_call was summarized away (or vice-versa). /v1 providers (Groq etc.) return 400 on
+ * such an orphan; Ollama is lenient (keys by tool_name), so this is a transparent no-op there. Fixed-point:
+ * moving the boundary past one pair can expose another, so we repeat until stable (tailStart only grows → ends).
+ */
+function pairSafeTailStart(messages: ChatMessage[], tailStart: number): number {
+  const pairs = findToolPairs(messages);
+  for (;;) {
+    let moved = false;
+    for (const { callIdx, resultIdx } of pairs.values()) {
+      if (resultIdx < 0) continue; // in-flight / orphaned call — no result to split
+      if (callIdx >= tailStart !== resultIdx >= tailStart) {
+        tailStart = Math.max(tailStart, Math.max(callIdx, resultIdx) + 1); // pull the whole pair into the summary
+        moved = true;
+      }
+    }
+    if (!moved) return tailStart;
+  }
+}
+
 /**
  * Produce a compacted message list: [system?, summary, ...recentTail].
  * Returns the input unchanged (summarized: 0) when there's nothing to compact.
  */
 export async function compactConversation(
-  deps: { client: OllamaClient; model?: string; gate?: Semaphore },
+  deps: { client: ModelClient; model?: string; gate?: Semaphore },
   messages: ChatMessage[],
   opts: { keepRecent?: number } = {},
 ): Promise<CompactionResult> {
@@ -126,6 +167,8 @@ export async function compactConversation(
   // Never start the kept tail on an orphan tool message — a tool result must
   // follow its assistant tool_call, so push such messages into the summary.
   while (tailStart < total && messages[tailStart].role === "tool") tailStart++;
+  // Never split a tool_call↔result pair across the summary/tail boundary (/v1 providers 400 on an orphan).
+  tailStart = pairSafeTailStart(messages, tailStart);
 
   const middle = messages.slice(bodyStart, tailStart);
   if (middle.length === 0) return { messages, summarized: 0 };

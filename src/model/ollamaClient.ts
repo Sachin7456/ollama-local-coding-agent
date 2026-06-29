@@ -9,12 +9,17 @@
 // (agent loop, tools, orchestrator) depends on the small typed surface below, so the
 // model is swappable just by changing config.
 
+import { randomUUID } from "node:crypto";
 import { resolveModel, OLLAMA_BASE_URL, type ModelConfig } from "../model/config.ts";
+import { type RetryConfig, RETRY_DEFAULTS, retryWithBackoff } from "./retry.ts";
+import type { ModelClient } from "./modelClient.ts";
 
 export type Role = "system" | "user" | "assistant" | "tool";
 
-/** A tool call emitted by the model. Native Ollama gives `arguments` as an object. */
+/** A tool call emitted by the model. Native Ollama gives `arguments` as an object. `id` links a call to its
+ *  result message (`ChatMessage.tool_call_id`) — generated for Ollama (no native id), provider-supplied for /v1. */
 export interface ToolCall {
+  id: string;
   function: { name: string; arguments: Record<string, unknown> };
 }
 
@@ -25,6 +30,8 @@ export interface ChatMessage {
   tool_calls?: ToolCall[];
   /** present on role:"tool" result messages — which tool produced this */
   tool_name?: string;
+  /** present on role:"tool" result messages — the id of the tool_call this result answers (required by /v1). */
+  tool_call_id?: string;
 }
 
 /** A tool definition as Ollama expects it under `tools` (standard function-calling schema). */
@@ -131,7 +138,8 @@ export function normalizeWireToolCall(tc: unknown): ToolCall | null {
       : rawArgs && typeof rawArgs === "object" && !Array.isArray(rawArgs)
         ? (rawArgs as Record<string, unknown>)
         : {};
-  return { function: { name, arguments: args } };
+  const id = pick(o.id) || randomUUID(); // Ollama emits no id → generate one so the result can link back
+  return { id, function: { name, arguments: args } };
 }
 
 /** Parse a native /api/chat response into our typed ChatResult. Pure function. */
@@ -155,64 +163,12 @@ export function parseChatResponse(json: unknown): ChatResult {
   };
 }
 
-// ---- transient-failure retry: exponential backoff + jitter (zero-dep) ----
+// Retry/backoff helpers now live in ./retry.ts (shared by all provider clients). Re-exported here so existing
+// importers and tests keep their import path stable.
+export { RETRY_DEFAULTS, shouldRetry, backoffDelayMs } from "./retry.ts";
+export type { RetryConfig } from "./retry.ts";
 
-/** Retry/backoff tuning. Defaults match common SDK practice, tightened for a fast LOCAL server. */
-export interface RetryConfig {
-  maxRetries: number;
-  initialDelayMs: number;
-  maxDelayMs: number;
-  factor: number;
-  /** ± fraction applied to each delay to avoid synchronized retries (thundering herd). */
-  jitterRatio: number;
-}
-
-export const RETRY_DEFAULTS: RetryConfig = {
-  maxRetries: 3,
-  initialDelayMs: 500,
-  maxDelayMs: 4000,
-  factor: 2,
-  jitterRatio: 0.25,
-};
-
-const RETRYABLE_NET_CODES = new Set(["ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "ENOTFOUND", "EAI_AGAIN", "EPIPE"]);
-
-/** Pull a network error code off an error OR its `.cause` — Node's `fetch` wraps the real cause in a TypeError. */
-function networkCode(err: unknown): string | undefined {
-  const e = err as { code?: unknown; cause?: unknown };
-  if (typeof e?.code === "string") return e.code;
-  const cause = e?.cause;
-  if (cause && typeof cause === "object" && typeof (cause as { code?: unknown }).code === "string") {
-    return (cause as { code: string }).code;
-  }
-  return undefined;
-}
-
-/**
- * Whether a failed request should be retried — TRANSIENT failures ONLY:
- *  • HTTP 408 / 429 / 5xx (status attached on the thrown error),
- *  • network errors (ECONNREFUSED etc. — `fetch` surfaces these as a TypeError with the code under `.cause`),
- *  • a per-request `TimeoutError` (the server stalled).
- * NEVER retries a user `AbortError` (Ctrl+C), other 4xx, or anything unrecognized (conservative default).
- */
-export function shouldRetry(err: unknown): boolean {
-  const e = err as { name?: unknown; status?: unknown; message?: unknown };
-  if (e?.name === "AbortError") return false; // user cancelled
-  if (e?.name === "TimeoutError") return true; // per-request timeout
-  if (typeof e?.status === "number") return e.status === 408 || e.status === 429 || e.status >= 500;
-  const code = networkCode(err);
-  if (code && RETRYABLE_NET_CODES.has(code)) return true;
-  return /fetch failed|network|timed? ?out/i.test(String(e?.message ?? ""));
-}
-
-/** Exponential backoff with ± jitter for attempt `i` (0-based). Pure. */
-export function backoffDelayMs(i: number, cfg: RetryConfig = RETRY_DEFAULTS): number {
-  const base = Math.min(cfg.maxDelayMs, cfg.initialDelayMs * Math.pow(cfg.factor, i));
-  const jitter = base * cfg.jitterRatio * (Math.random() * 2 - 1);
-  return Math.max(0, Math.round(base + jitter));
-}
-
-export class OllamaClient {
+export class OllamaClient implements ModelClient {
   private baseUrl: string;
   private retry: RetryConfig;
 
@@ -220,47 +176,6 @@ export class OllamaClient {
     // strip a trailing slash so `${baseUrl}/api/chat` is always well-formed
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.retry = { ...RETRY_DEFAULTS, ...(opts?.retry ?? {}) };
-  }
-
-  /** Sleep that settles early (rejecting) if the signal aborts — so Ctrl+C cancels a pending backoff at once. */
-  private _sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
-    return new Promise((resolve, reject) => {
-      if (signal?.aborted) return reject(signal.reason ?? new Error("aborted"));
-      const onAbort = (): void => {
-        cleanup();
-        reject(signal?.reason ?? new Error("aborted"));
-      };
-      const cleanup = (): void => {
-        clearTimeout(timer);
-        signal?.removeEventListener("abort", onAbort);
-      };
-      const timer = setTimeout(() => {
-        cleanup();
-        resolve();
-      }, ms);
-      signal?.addEventListener("abort", onAbort, { once: true });
-    });
-  }
-
-  /**
-   * Run `attempt`, retrying TRANSIENT failures with exponential backoff + jitter. The USER `signal` (not any
-   * per-request timeout) stops the loop: an abort throws immediately — at the top of an iteration AND right after
-   * a caught error, before any backoff (so a Ctrl+C during the error window can't trigger another attempt).
-   */
-  private async _retryWithBackoff<T>(attempt: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-    let lastErr: unknown;
-    for (let i = 0; i <= this.retry.maxRetries; i++) {
-      if (signal?.aborted) throw signal.reason ?? new Error("aborted");
-      try {
-        return await attempt();
-      } catch (err) {
-        lastErr = err;
-        if (signal?.aborted) throw err; // user cancelled mid-attempt
-        if (i === this.retry.maxRetries || !shouldRetry(err)) throw err;
-        await this._sleepWithAbort(backoffDelayMs(i, this.retry), signal);
-      }
-    }
-    throw lastErr;
   }
 
   /** The AbortSignal for ONE attempt: the user signal, optionally combined with a FRESH per-attempt timeout. */
@@ -273,7 +188,7 @@ export class OllamaClient {
   /** One non-streaming chat turn. Retries transient failures; throws on non-2xx (4xx) / user abort. */
   async chat(opts: ChatOptions): Promise<ChatResult> {
     const body = buildChatRequest(opts);
-    return this._retryWithBackoff(async () => {
+    return retryWithBackoff(async () => {
       const res = await fetch(`${this.baseUrl}/api/chat`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -289,7 +204,7 @@ export class OllamaClient {
       }
       const json: unknown = await res.json();
       return parseChatResponse(json);
-    }, opts.signal);
+    }, opts.signal, this.retry);
   }
 
   /**
@@ -301,7 +216,7 @@ export class OllamaClient {
     // Retry ONLY the connect (fetch + res.ok). The stream is read OUTSIDE the retry: mid-stream reader.read()
     // errors are NOT retried — stream-start is the retryable part, mid-body failures are rare, and retrying would
     // RE-EMIT already-delivered onDelta chunks. (A fresh per-attempt timeout, if set, resets on each retry.)
-    const res = await this._retryWithBackoff(async () => {
+    const res = await retryWithBackoff(async () => {
       const r = await fetch(`${this.baseUrl}/api/chat`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -316,7 +231,7 @@ export class OllamaClient {
         );
       }
       return r;
-    }, opts.signal);
+    }, opts.signal, this.retry);
     if (!res.body) throw new Error("Ollama returned no response body for streaming.");
 
     const reader = res.body.getReader();
@@ -377,13 +292,13 @@ export class OllamaClient {
 
   /** Liveness/inventory check via GET /api/tags. Retries transient failures. Returns model tags. */
   async listModels(signal?: AbortSignal): Promise<string[]> {
-    return this._retryWithBackoff(async () => {
+    return retryWithBackoff(async () => {
       const res = await fetch(`${this.baseUrl}/api/tags`, { signal });
       if (!res.ok) throw Object.assign(new Error(`Ollama /api/tags failed: ${res.status}`), { status: res.status });
       const json = (await res.json()) as { models?: Array<{ name?: string }> };
       return Array.isArray(json.models)
         ? json.models.map((m) => m.name ?? "").filter((n) => n.length > 0)
         : [];
-    }, signal);
+    }, signal, this.retry);
   }
 }

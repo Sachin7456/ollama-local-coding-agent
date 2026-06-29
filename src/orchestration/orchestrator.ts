@@ -7,7 +7,7 @@
 //     2 are generating at any instant — extra ones queue;
 //   - subagents cannot spawn (one level only), so no recursion / runaway.
 
-import { OllamaClient } from "../model/ollamaClient.ts";
+import type { ModelClient } from "../model/modelClient.ts";
 import {
   ToolRegistry,
   createFullRegistry,
@@ -35,7 +35,7 @@ const WORKER_PROMPT = `You are a worker agent with a single, self-contained task
 - When done, reply with a short result summary (no tool call).`;
 
 export interface OrchestratorDeps {
-  client: OllamaClient;
+  client: ModelClient;
   permissions: PermissionEngine;
   /** shared workspace context for the orchestrator */
   ctx: ToolContext;

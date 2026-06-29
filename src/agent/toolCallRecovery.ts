@@ -9,6 +9,7 @@
 // Gated on a known-tool predicate so a normal JSON *answer* is never mistaken for
 // a tool call.
 
+import { randomUUID } from "node:crypto";
 import type { ToolCall } from "../model/ollamaClient.ts";
 
 export interface RecoveredCalls {
@@ -100,7 +101,7 @@ function tryParseCall(s: string, isKnownTool?: (name: string) => boolean): ToolC
       : rawArgs && typeof rawArgs === "object" && !Array.isArray(rawArgs)
         ? (rawArgs as Record<string, unknown>)
         : {};
-  return { function: { name, arguments: args } };
+  return { id: randomUUID(), function: { name, arguments: args } };
 }
 
 /** Extract the first balanced {...} JSON object from a string (quote/escape aware). */
@@ -172,7 +173,7 @@ function recoverFunctionCallSyntax(
     if (!args) continue; // empty/ambiguous args -> prose, skip
     const start = m.index + (m[1] ? m[1].length : 0);
     const end = bal.end + 1;
-    calls.push({ function: { name, arguments: args } });
+    calls.push({ id: randomUUID(), function: { name, arguments: args } });
     spans.push([start, end]);
     matchedChars += end - start;
     idRe.lastIndex = end;

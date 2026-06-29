@@ -154,6 +154,70 @@ test("runAgent compacts mid-loop when prompt tokens exceed the threshold", async
   }
 });
 
+// ---------------- pair-safe compaction (no orphaned tool_call <-> result) ----------------
+/** Assert the compacted list is valid for strict /v1 providers: every tool result has a preceding matching
+ *  assistant tool_call, and every assistant tool_call has a following result. */
+function assertNoOrphans(messages: ChatMessage[]): void {
+  const callAt = new Map<string, number>();
+  messages.forEach((m, i) => {
+    if (m.role === "assistant" && m.tool_calls) for (const c of m.tool_calls) callAt.set(c.id, i);
+  });
+  messages.forEach((m, i) => {
+    if (m.role === "tool" && m.tool_call_id) {
+      const ci = callAt.get(m.tool_call_id);
+      assert.ok(ci !== undefined && ci < i, `orphaned tool result: ${m.tool_call_id}`);
+    }
+  });
+  for (const [id, ci] of callAt) {
+    const hasResult = messages.some((m, i) => i > ci && m.role === "tool" && m.tool_call_id === id);
+    assert.ok(hasResult, `orphaned tool_call: ${id}`);
+  }
+}
+
+test("compaction keeps a multi-tool-call assistant + all its results together (no orphan)", async () => {
+  const m = await mockModel((b) => (isSummaryCall(b) ? { content: "SUMMARY" } : { content: "x" }));
+  try {
+    const messages: ChatMessage[] = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "q1" },
+      { role: "user", content: "q2" },
+      { role: "assistant", content: "", tool_calls: [
+        { id: "c1", function: { name: "read_file", arguments: {} } },
+        { id: "c2", function: { name: "grep", arguments: {} } },
+      ] },
+      { role: "tool", content: "r1", tool_name: "read_file", tool_call_id: "c1" },
+      { role: "tool", content: "r2", tool_name: "grep", tool_call_id: "c2" },
+      { role: "user", content: "q3" },
+      { role: "assistant", content: "done" },
+    ];
+    const out = await compactConversation({ client: m.client }, messages, { keepRecent: 3 });
+    assert.ok(out.summarized > 0);
+    assertNoOrphans(out.messages);
+  } finally {
+    await m.close();
+  }
+});
+
+test("compaction never splits a NON-adjacent tool_call↔result across the boundary (the fix)", async () => {
+  // Synthetic: a non-tool message sits between a tool_call and its result, so the old tool-only guard would NOT
+  // catch it — the call would land in the summary and the result in the kept tail = orphan → /v1 400.
+  const m = await mockModel((b) => (isSummaryCall(b) ? { content: "SUMMARY" } : { content: "x" }));
+  try {
+    const messages: ChatMessage[] = [
+      { role: "system", content: "sys" },
+      { role: "assistant", content: "", tool_calls: [{ id: "c1", function: { name: "read_file", arguments: {} } }] },
+      { role: "user", content: "noise between call and result" },
+      { role: "tool", content: "r1", tool_name: "read_file", tool_call_id: "c1" },
+      { role: "user", content: "q2" },
+      { role: "assistant", content: "a2" },
+    ];
+    const out = await compactConversation({ client: m.client }, messages, { keepRecent: 4 });
+    assertNoOrphans(out.messages); // pairSafeTailStart pulls the whole pair into the summary
+  } finally {
+    await m.close();
+  }
+});
+
 // ---------------- truncateToolResults (cheap, model-free first step) ----------------
 test("truncateToolResults caps oversized tool content and reports savedChars", () => {
   const msgs: ChatMessage[] = [
