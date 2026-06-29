@@ -79,7 +79,7 @@ test("chatStream throws on non-2xx", async () => {
   });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const { port } = server.address() as AddressInfo;
-  const client = new OllamaClient(`http://127.0.0.1:${port}`);
+  const client = new OllamaClient(`http://127.0.0.1:${port}`, { retry: { maxRetries: 0 } }); // no retry → fast assert
   try {
     await assert.rejects(
       () => client.chatStream({ messages: [{ role: "user", content: "x" }] }, () => {}),
