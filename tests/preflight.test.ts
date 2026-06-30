@@ -17,6 +17,19 @@ test("A2: checkMemoryHeadroom warns only when models likely won't fit", () => {
   assert.equal(checkMemoryHeadroom(["mystery"], {}, 1 * GB), null);
 });
 
+test("A9: a single oversized model warns with SINGULAR wording", () => {
+  const warn = checkMemoryHeadroom(["big:30b"], { "big:30b": { approxSizeGB: 18 } }, 16 * GB);
+  assert.ok(warn && /the selected model needs/.test(warn)); // singular
+  assert.doesNotMatch(warn ?? "", /single-agent mode/); // multi-only advice not shown for one model
+});
+
+test("A9: multiple oversized models keep the PLURAL wording", () => {
+  const models = { "small:7b": { approxSizeGB: 4.7 }, "big:30b": { approxSizeGB: 18 } };
+  const warn = checkMemoryHeadroom(["small:7b", "big:30b"], models, 16 * GB);
+  assert.ok(warn && /the selected models need/.test(warn)); // plural
+  assert.match(warn ?? "", /single-agent mode|fewer models/);
+});
+
 function fakeFetch(models: string[]): typeof fetch {
   return (async () => ({
     ok: true,

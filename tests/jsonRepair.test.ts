@@ -40,6 +40,20 @@ test("repairs a truncated object (missing closing brace)", () => {
   assert.deepEqual(looseParseObject('{"a":{"b":1}'), { a: { b: 1 } });
 });
 
+test("A4: a truncated mid-string value is NOT completed (returns null, fail-safe)", () => {
+  assert.equal(looseParseObject('{"path":"a.txt","content":"function f() {'), null); // cut off inside a value
+  assert.equal(looseParseObject("{'content':'partial value"), null);
+  assert.equal(looseParseObject('{"a":"b","c":"unclosed'), null);
+  // brace-only truncation (strings closed) still recovers — proves we only refuse an OPEN string, not all truncation
+  assert.deepEqual(looseParseObject('{"path":"a.txt"'), { path: "a.txt" });
+});
+
+test("A5: smart/curly quotes — preserved inside values, straightened as delimiters", () => {
+  assert.deepEqual(looseParseObject('{"msg":"she said “hi”"}'), { msg: "she said “hi”" }); // curly INSIDE a value kept verbatim
+  assert.deepEqual(looseParseObject("{“cmd”:“echo }”}"), { cmd: "echo }" }); // curly delimiters + a brace inside the value
+  assert.deepEqual(looseParseObject("{‘path’:‘a.txt’}"), { path: "a.txt" }); // curly single-quote delimiters
+});
+
 test("does NOT corrupt quotes/braces that live inside string values", () => {
   // already valid JSON -> returned as-is, apostrophe + inner brace untouched
   assert.deepEqual(looseParseObject('{"msg":"it\'s fine"}'), { msg: "it's fine" });

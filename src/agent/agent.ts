@@ -30,6 +30,7 @@ export type AgentEvent =
   | { type: "tool_result"; tool: string; decision: PermissionDecision; content: string; turn: number }
   | { type: "compaction"; summarized: number; truncatedChars?: number; turn: number }
   | { type: "reflection"; reason: "tool_error" | "repeated_denial"; turn: number }
+  | { type: "warning"; code: string; message: string; turn: number }
   | { type: "done"; reason: string; turns: number };
 
 export interface RunAgentOptions {
@@ -91,6 +92,11 @@ const LOOP_WARNING =
 const MAX_REFLECTIONS_PER_RUN = 1; // at most one triggered self-check per run (cost-bounded; never per-turn)
 const REFLECTION_PROMPT =
   "The last step hit a problem (a tool error or a blocked action). Briefly check: was the tool name and arguments right, or should you try a different tool or approach? Then take the corrected action, or give your final answer.";
+// HW: shown ONCE when tools were offered but the model never emitted a real tool call all run (it only narrated /
+// faked the tool protocol). Usually means the endpoint/model doesn't support function-calling (some /v1 gateways
+// strip the `tools` parameter) — not something the harness can fix, so we make the failure legible.
+const TOOLS_IGNORED_MSG =
+  "The model produced text but emitted no tool calls all run, although tools were available — this endpoint/model may not support function-calling (some /v1 gateways strip the tools parameter). For agentic tasks, use a tool-capable model (a local Ollama coder model, or a /v1 provider that forwards tools).";
 
 // How a resolved tool call moves the denial circuit-breaker counter.
 type DenialEffect = "reset" | "increment" | "none";
@@ -130,6 +136,17 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentResult> {
   let lastToolFingerprint = "";
   const perToolRepairAttempts = new Map<string, number>(); // tool name -> consecutive malformed-args attempts
   let reflectionsUsed = 0; // Help006: bounded triggered self-reflection
+  // HW: detect an endpoint/model that ignores tool-calling, so the user gets a clear hint (not a silent narrate-loop).
+  const toolsSent = opts.registry.toToolDefs(opts.toolNames).length > 0;
+  let toolCallEverEmitted = false;
+  let sawAttemptedToolUse = false; // the model tried to "use" a tool in TEXT (narration / fake protocol tag)
+  let warnedToolsIgnored = false;
+  const maybeWarnToolsIgnored = (turnNo: number): void => {
+    if (toolsSent && !toolCallEverEmitted && sawAttemptedToolUse && !warnedToolsIgnored) {
+      warnedToolsIgnored = true;
+      emit({ type: "warning", code: "tools_ignored", message: TOOLS_IGNORED_MSG, turn: turnNo });
+    }
+  };
 
   for (let turn = 1; turn <= maxTurns; turn++) {
     // Stop before spending a generation if the run was aborted (Ctrl+C / exit).
@@ -168,6 +185,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentResult> {
         assistantText = recovered.cleanedText;
       }
     }
+    if (toolCalls.length > 0) toolCallEverEmitted = true;
 
     record({
       role: "assistant",
@@ -185,11 +203,17 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentResult> {
       // loop; a genuine short answer (no action phrasing) still terminates immediately.
       const empty = assistantText.trim().length === 0;
       const narrated = !empty && NARRATION_RE.test(assistantText);
+      // HW: the model trying to "use" a tool in TEXT — narration, or a fake tool-protocol tag (e.g. <tool_output>,
+      // which recoverToolCallsFromContent can't turn into a real call). A signal the endpoint may be ignoring tools.
+      if (narrated || /<tool_call|<tool_output|<function_call/i.test(assistantText)) sawAttemptedToolUse = true;
       if ((empty || narrated) && consecutiveNudges < MAX_CONSECUTIVE_NUDGES) {
-        consecutiveNudges++;
-        record({ role: "user", content: empty ? NO_ACTION_NUDGE : NARRATION_NUDGE });
+        if (turn < maxTurns) {
+          consecutiveNudges++;
+          record({ role: "user", content: empty ? NO_ACTION_NUDGE : NARRATION_NUDGE });
+        }
         continue;
       }
+      maybeWarnToolsIgnored(turn);
       emit({ type: "done", reason: "model returned a final answer", turns: turn });
       return { text: assistantText, messages, turns: turn, stopReason: "completed" };
     }
@@ -207,6 +231,9 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentResult> {
       lastToolFingerprint = toolFingerprint;
     }
     if (consecutiveRepeats >= MAX_CONSECUTIVE_REPEATS) {
+      for (const c of toolCalls) {
+        record({ role: "tool", content: "Skipped: stopped by the loop guard (same tool call repeated without progress).", tool_name: c.function.name, tool_call_id: c.id });
+      }
       emit({ type: "done", reason: "loop: repeated the same tool call without progress", turns: turn });
       return {
         text: "Stopped: the model repeated the same action without making progress.",
@@ -294,12 +321,11 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentResult> {
       sawToolFailure = resolved.some((r) => isToolFailure(r.decision, r.content));
     }
 
-    // Help006: ONE bounded self-check after a DETECTED problem — a tool crash / unknown-tool (isToolFailure, which
-    // deliberately does NOT flag invalid-args denials — the Help007 repair budget owns those), OR the 2nd
-    // consecutive denial of any kind (just before the breaker). Skipped on the repeat turn (LOOP_WARNING owns that)
-    // so the two nudges never stack. Falls through, so the loop-warning + circuit-breaker checks still run this turn.
+    const hasNextTurn = turn < maxTurns;
+
     if (
       opts.reflect !== false &&
+      hasNextTurn &&
       reflectionsUsed < MAX_REFLECTIONS_PER_RUN &&
       consecutiveRepeats !== 1 &&
       (sawToolFailure || consecutiveDenials === MAX_CONSECUTIVE_DENIALS - 1)
@@ -310,7 +336,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentResult> {
     }
 
     // On the 2nd identical tool-call turn, warn the model once so it can break out before the hard stop.
-    if (consecutiveRepeats === 1) {
+    if (consecutiveRepeats === 1 && hasNextTurn) {
       record({ role: "user", content: LOOP_WARNING });
     }
 
@@ -359,6 +385,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentResult> {
     }
   }
 
+  maybeWarnToolsIgnored(maxTurns);
   emit({ type: "done", reason: "reached max turns", turns: maxTurns });
   const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
   return {

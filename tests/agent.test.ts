@@ -238,6 +238,30 @@ test("loop guard stops a model repeating the SAME tool call (before maxTurns)", 
   }
 });
 
+test("A1: a loop-guard stop leaves no orphaned tool_call (synthetic results pair every call)", async () => {
+  const m = await scriptedModel(() => ({ tool_calls: [toolCall("read_file", { path: "a.txt" })] }));
+  try {
+    const res = await runAgent({
+      client: m.client,
+      registry: createDefaultRegistry(),
+      permissions: createDefaultPermissions("default"),
+      ctx: { cwd: tmp },
+      userMessage: "loop",
+      maxTurns: 12,
+    });
+    assert.equal(res.stopReason, "loop");
+    // invariant: every assistant tool_call.id has a matching tool result (no /v1-breaking orphan persisted)
+    const resultIds = new Set(res.messages.filter((x) => x.role === "tool").map((x) => x.tool_call_id));
+    for (const x of res.messages) {
+      if (x.role === "assistant" && x.tool_calls) {
+        for (const c of x.tool_calls) assert.ok(resultIds.has(c.id), `assistant tool_call ${c.id} has no matching tool result`);
+      }
+    }
+  } finally {
+    await m.close();
+  }
+});
+
 test("loop guard does NOT trip on a normal multi-step sequence", async () => {
   const m = await scriptedModel((i) =>
     i === 0
@@ -840,6 +864,88 @@ test("Help006: NO reflection on a successful run (never second-guesses a correct
       ctx: { cwd: tmp }, userMessage: "go", model: "qwen2.5-coder:7b", onEvent: (e) => events.push(e),
     });
     assert.equal(events.filter((e) => e.type === "reflection").length, 0);
+    assert.equal(res.stopReason, "completed");
+  } finally {
+    await m.close();
+  }
+});
+
+test("A11: reflection does NOT fire on the final turn (no orphaned prompt)", async () => {
+  const m = await scriptedModel(() => ({ tool_calls: [toolCall("boom", { n: 0 })] })); // boom throws every turn
+  try {
+    const events: any[] = [];
+    const res = await runAgent({
+      client: m.client, registry: new ToolRegistry().register(boomTool), permissions: createDefaultPermissions("default"),
+      ctx: { cwd: tmp }, userMessage: "go", model: "qwen2.5-coder:7b", maxTurns: 1, onEvent: (e) => events.push(e),
+    });
+    assert.equal(events.filter((e) => e.type === "reflection").length, 0); // final turn → no dead reflection
+    assert.equal(res.messages.at(-1)?.role, "tool"); // last message is the tool result, not a trailing user reflection
+    assert.equal(res.stopReason, "max_turns");
+  } finally {
+    await m.close();
+  }
+});
+
+test("A11: the loop-warning does NOT fire on the final turn", async () => {
+  const okTool: Tool = { name: "okt", description: "ok", readOnly: true, parameters: { type: "object", properties: {} }, execute: async () => "fine" };
+  const m = await scriptedModel(() => ({ tool_calls: [toolCall("okt", {})] })); // identical every turn
+  try {
+    const res = await runAgent({
+      client: m.client, registry: new ToolRegistry().register(okTool), permissions: createDefaultPermissions("default"),
+      ctx: { cwd: tmp }, userMessage: "go", model: "qwen2.5-coder:7b", maxTurns: 2,
+    });
+    // turn 2 is the last turn (consecutiveRepeats===1 there) → LOOP_WARNING is gated out by hasNextTurn
+    assert.ok(!res.messages.some((x) => x.role === "user" && /repeated the same action/.test(x.content ?? "")));
+    assert.equal(res.stopReason, "max_turns");
+  } finally {
+    await m.close();
+  }
+});
+
+test("A11: the idle/narration nudge is not orphaned on the final turn (still ends honestly as max_turns)", async () => {
+  const m = await scriptedModel(() => ({ content: "" })); // empty output every turn (no tool call, no answer)
+  try {
+    const res = await runAgent({
+      client: m.client, registry: createDefaultRegistry(), permissions: createDefaultPermissions("default"),
+      ctx: { cwd: tmp }, userMessage: "go", model: "qwen2.5-coder:7b", maxTurns: 1,
+    });
+    assert.equal(res.stopReason, "max_turns"); // honest — NOT a misleading "completed" with empty text
+    assert.ok(!res.messages.some((x) => x.role === "user" && /did not call a tool/.test(x.content ?? ""))); // no orphan nudge
+  } finally {
+    await m.close();
+  }
+});
+
+test("HW: warns once when tools are offered but the model only narrates (endpoint ignoring tools)", async () => {
+  // Model narrates every turn, never emits a real tool call — like a /v1 endpoint that strips the tools param.
+  const m = await scriptedModel(() => ({ content: "Let me read the file config.ts to find the answer." }));
+  try {
+    const events: any[] = [];
+    await runAgent({
+      client: m.client, registry: createDefaultRegistry(), permissions: createDefaultPermissions("default"),
+      ctx: { cwd: tmp }, userMessage: "find the files with open issues", model: "qwen2.5-coder:7b", maxTurns: 2,
+      onEvent: (e) => events.push(e),
+    });
+    const warnings = events.filter((e) => e.type === "warning");
+    assert.equal(warnings.length, 1); // exactly one (latched), not per-turn
+    assert.equal(warnings[0].code, "tools_ignored");
+    assert.match(warnings[0].message, /no tool calls/i);
+  } finally {
+    await m.close();
+  }
+});
+
+test("HW: no tools-ignored warning when the model DOES emit a real tool call", async () => {
+  const okTool: Tool = { name: "okt", description: "ok", readOnly: true, parameters: { type: "object", properties: {} }, execute: async () => "fine" };
+  // turn 1: a real tool call; turn 2: a plain final answer.
+  const m = await scriptedModel((i) => (i === 0 ? { tool_calls: [toolCall("okt", {})] } : { content: "Done." }));
+  try {
+    const events: any[] = [];
+    const res = await runAgent({
+      client: m.client, registry: new ToolRegistry().register(okTool), permissions: createDefaultPermissions("default"),
+      ctx: { cwd: tmp }, userMessage: "go", model: "qwen2.5-coder:7b", maxTurns: 3, onEvent: (e) => events.push(e),
+    });
+    assert.equal(events.filter((e) => e.type === "warning").length, 0);
     assert.equal(res.stopReason, "completed");
   } finally {
     await m.close();

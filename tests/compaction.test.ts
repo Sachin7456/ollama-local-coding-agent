@@ -233,6 +233,24 @@ test("truncateToolResults caps oversized tool content and reports savedChars", (
   assert.equal(out.messages[0].content, "sys"); // non-tool untouched
 });
 
+test("NIT: truncateToolResults is idempotent even at a tiny cap (head reserves marker room)", () => {
+  const msgs: ChatMessage[] = [{ role: "tool", content: "y".repeat(5000), tool_name: "read_file" }];
+  const pass1 = truncateToolResults(msgs, 100, { keepLast: false });
+  assert.ok(pass1.savedChars > 0);
+  assert.ok(pass1.messages[0].content.length <= 100); // result fits under the cap (head + marker)
+  const pass2 = truncateToolResults(pass1.messages, 100, { keepLast: false });
+  assert.equal(pass2.savedChars, 0); // second pass changes nothing
+  assert.equal(pass2.messages[0].content, pass1.messages[0].content);
+});
+
+test("NIT: truncateToolResults stays idempotent when head >= cap", () => {
+  const msgs: ChatMessage[] = [{ role: "tool", content: "z".repeat(5000), tool_name: "read_file" }];
+  const pass1 = truncateToolResults(msgs, 2000, { head: 5000, keepLast: false }); // head clamped below cap
+  assert.ok(pass1.messages[0].content.length <= 2000);
+  const pass2 = truncateToolResults(pass1.messages, 2000, { head: 5000, keepLast: false });
+  assert.equal(pass2.savedChars, 0);
+});
+
 test("truncateToolResults keeps the most recent tool message verbatim", () => {
   const big2 = "b".repeat(4000);
   const msgs: ChatMessage[] = [

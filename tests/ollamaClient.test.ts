@@ -13,6 +13,7 @@ import {
   shouldRetry,
   backoffDelayMs,
 } from "../src/model/ollamaClient.ts";
+import { idleWatchdog } from "../src/model/retry.ts";
 
 /** Tiny delays + no jitter so retry tests run instantly + deterministically. */
 const FAST = { retry: { maxRetries: 3, initialDelayMs: 1, maxDelayMs: 2, factor: 2, jitterRatio: 0 } };
@@ -212,6 +213,33 @@ test("shouldRetry: 408/429/5xx + network codes + TimeoutError yes; 4xx/AbortErro
   assert.equal(shouldRetry(Object.assign(new Error("stalled"), { name: "TimeoutError" })), true);
   assert.equal(shouldRetry(Object.assign(new Error("cancelled"), { name: "AbortError" })), false);
   assert.equal(shouldRetry(new Error("something unexpected")), false); // conservative default
+  // A6: a concrete TLS/cert code is PERMANENT — not retried (was wrongly retried via the message fallback)
+  assert.equal(shouldRetry(Object.assign(new TypeError("fetch failed"), { cause: { code: "CERT_HAS_EXPIRED" } })), false);
+  assert.equal(shouldRetry(Object.assign(new TypeError("fetch failed"), { cause: { code: "DEPTH_ZERO_SELF_SIGNED_CERT" } })), false);
+  // A6: widened transient set still retried (these used to rely on the message regex)
+  assert.equal(shouldRetry(Object.assign(new TypeError("fetch failed"), { cause: { code: "ENETUNREACH" } })), true);
+  assert.equal(shouldRetry(Object.assign(new TypeError("fetch failed"), { cause: { code: "UND_ERR_SOCKET" } })), true);
+});
+
+test("A7 idleWatchdog: pass-through when disabled; fires TimeoutError on idle; forwards a user abort", async () => {
+  const u = new AbortController();
+  const pass = idleWatchdog(0, u.signal);
+  assert.equal(pass.signal, u.signal); // idleMs<=0 → the user signal straight through
+  pass.kick();
+  pass.clear(); // no-ops, no throw
+
+  const wd = idleWatchdog(30);
+  const name = await new Promise<string>((resolve) => {
+    wd.signal!.addEventListener("abort", () => resolve((wd.signal!.reason as Error).name), { once: true });
+  });
+  assert.equal(name, "TimeoutError"); // fired after idleMs of no kick
+  wd.clear();
+
+  const ua = new AbortController();
+  ua.abort(new Error("ctrl-c"));
+  const wd2 = idleWatchdog(1000, ua.signal);
+  assert.equal(wd2.signal!.aborted, true); // a pre-aborted user signal forwards immediately
+  wd2.clear();
 });
 
 test("backoffDelayMs grows exponentially and caps (jitter 0 -> exact)", () => {

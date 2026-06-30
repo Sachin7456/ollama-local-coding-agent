@@ -5,7 +5,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { loadProjectRules, findProjectRulesFile } from "../src/state/projectRules.ts";
+import { createHash } from "node:crypto";
+import { loadProjectRules, findProjectRulesFile, projectRulesIdentity } from "../src/state/projectRules.ts";
 
 let tmp = "";
 before(async () => {
@@ -51,6 +52,19 @@ test("findProjectRulesFile: prefers .qwen-harness.md over AGENTS.md", async () =
     await fs.writeFile(path.join(dir, "AGENTS.md"), "a");
     await fs.writeFile(path.join(dir, ".qwen-harness.md"), "b");
     assert.equal(findProjectRulesFile(dir), ".qwen-harness.md");
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("A2 projectRulesIdentity: null when none; {name, sha256(content)} when present", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "qh-id-"));
+  try {
+    assert.equal(projectRulesIdentity(dir), null);
+    await fs.writeFile(path.join(dir, "AGENTS.md"), "hello rules");
+    const id = projectRulesIdentity(dir);
+    assert.equal(id?.name, "AGENTS.md");
+    assert.equal(id?.hash, createHash("sha256").update("hello rules").digest("hex")); // hashes raw content
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }

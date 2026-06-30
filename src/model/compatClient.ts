@@ -33,6 +33,39 @@ function toWireMessage(m: ChatMessage): Record<string, unknown> {
   return { role: m.role, content: m.content };
 }
 
+/**
+ * A1: drop dangling tool plumbing before a /v1 request. /v1 providers 400 unless every assistant tool_call is
+ * followed by a matching tool result and every tool result has a preceding call. A loop-guard stop (or a crash
+ * between recording the call and its result) leaves an orphan that survives in the in-memory history and the
+ * persisted transcript, breaking the next message / a --resume. We keep a tool_call ONLY if its result exists and
+ * a tool result ONLY if its call exists (symmetric, so we never create a new orphan). Ollama is lenient (keys by
+ * tool_name) so its client never calls this. Pure: returns a new array, reusing refs of unchanged messages.
+ */
+export function stripOrphanedToolCalls(messages: ChatMessage[]): ChatMessage[] {
+  const callIds = new Set<string>();
+  const resultIds = new Set<string>();
+  for (const m of messages) {
+    if (m.role === "assistant" && m.tool_calls) for (const c of m.tool_calls) callIds.add(c.id);
+    else if (m.role === "tool" && m.tool_call_id) resultIds.add(m.tool_call_id);
+  }
+  const paired = (id?: string): boolean => !!id && callIds.has(id) && resultIds.has(id);
+  const out: ChatMessage[] = [];
+  for (const m of messages) {
+    if (m.role === "assistant" && m.tool_calls && m.tool_calls.length > 0) {
+      const kept = m.tool_calls.filter((c) => paired(c.id));
+      if (kept.length === m.tool_calls.length) out.push(m); // fully paired: reuse ref
+      else if (kept.length > 0) out.push({ ...m, tool_calls: kept }); // partial: keep the paired calls
+      else if (m.content.trim()) out.push({ ...m, tool_calls: undefined }); // all-orphan: keep as plain text
+      // all-orphan + empty content: drop the message entirely
+    } else if (m.role === "tool") {
+      if (paired(m.tool_call_id)) out.push(m); // orphan result: drop
+    } else {
+      out.push(m);
+    }
+  }
+  return out;
+}
+
 /** Parse one /v1 tool_call entry (arguments arrive as a JSON STRING). null if it has no usable name. */
 function fromWireToolCall(tc: unknown): ToolCall | null {
   const o = (tc ?? {}) as Record<string, unknown>;
@@ -100,7 +133,7 @@ export class CompatClient implements ModelClient {
     const headers = { "content-type": "application/json", ...this.authHeader() }; // throws early if key missing
     const body: Record<string, unknown> = {
       model: cfg.name,
-      messages: opts.messages.map(toWireMessage),
+      messages: stripOrphanedToolCalls(opts.messages).map(toWireMessage), // A1: never send an orphaned tool_call/result to /v1
       stream: false,
       temperature: cfg.sampling.temperature,
       top_p: cfg.sampling.top_p,
@@ -123,7 +156,19 @@ export class CompatClient implements ModelClient {
               : `compat /chat/completions failed: ${res.status} ${res.statusText} ${detail}`.trim();
           throw Object.assign(new Error(msg), { status: res.status });
         }
-        return parseCompatResponse(await res.json());
+        // Some /v1 gateways answer HTTP 200 with an error ENVELOPE ({"error":{...}}) instead of a completion.
+        // Without this, parseCompatResponse would read it as empty text + no tool_calls and the agent loop would
+        // silently idle-nudge. Surface it as a clear, fail-fast error (shouldRetry → false for a plain Error).
+        const json: unknown = await res.json();
+        const provErr = json && typeof json === "object" ? (json as Record<string, unknown>).error : undefined;
+        if (provErr) {
+          const m =
+            provErr && typeof provErr === "object" && typeof (provErr as Record<string, unknown>).message === "string"
+              ? ((provErr as Record<string, unknown>).message as string)
+              : JSON.stringify(provErr);
+          throw new Error(`compat /chat/completions returned a provider error: ${m}`);
+        }
+        return parseCompatResponse(json);
       },
       opts.signal,
       this.retry,

@@ -54,8 +54,10 @@ function objectCandidate(s: string): string | null {
   return s.slice(start); // unbalanced -> truncated
 }
 
+/** A5: straighten smart/curly quotes, but ONLY outside straight-double-quoted strings — so curly quotes that are
+ * legitimate content inside a value are preserved, while curly DELIMITERS get straightened. Run before objectCandidate. */
 function normalizeSmartQuotes(s: string): string {
-  return s.replace(/[“”]/g, '"').replace(/[‘’]/g, "'");
+  return mapOutsideStrings(s, (seg) => seg.replace(/[“”]/g, '"').replace(/[‘’]/g, "'"));
 }
 
 /**
@@ -148,7 +150,9 @@ function stripTrailingCommas(s: string): string {
   return mapOutsideStrings(s, (seg) => seg.replace(/,(\s*[}\]])/g, "$1"));
 }
 
-/** Close any string / "{" / "[" left open at the end (truncation). Quote-aware, double-quote only (run post single->double). */
+/** Close any unbalanced "{"/"[" left open at the end (truncation). An UNTERMINATED string is intentionally NOT
+ * completed (see A4): fabricating a closing quote forges a partial value (e.g. a write_file `content` cut off
+ * mid-stream) into a "valid" one that gets written verbatim. Leave it unparseable → the caller's {} fallback. */
 function closeUnbalanced(s: string): string {
   const stack: string[] = [];
   let inStr = false;
@@ -166,8 +170,8 @@ function closeUnbalanced(s: string): string {
     else if (ch === "[") stack.push("]");
     else if (ch === "}" || ch === "]") stack.pop();
   }
+  if (inStr) return s; // A4: truncated mid-string — do NOT fabricate a closing quote (fail-safe, no silent partial write)
   let out = s;
-  if (inStr) out += '"';
   for (let i = stack.length - 1; i >= 0; i--) out += stack[i];
   return out;
 }
@@ -176,7 +180,6 @@ function closeUnbalanced(s: string): string {
 // before AND after closeUnbalanced (a freshly added closer can expose a trailing comma).
 const REPAIRS: Array<(s: string) => string> = [
   (s) => s,
-  normalizeSmartQuotes,
   singleToDouble,
   quoteBareKeys,
   pythonLiterals,
@@ -191,7 +194,7 @@ const REPAIRS: Array<(s: string) => string> = [
  */
 export function looseParseObject(s: string): Obj | null {
   if (typeof s !== "string" || s.indexOf("{") < 0) return null;
-  const cand = objectCandidate(s);
+  const cand = objectCandidate(normalizeSmartQuotes(s)); // A5: straighten curly delimiters first (quote-aware), so the span scan is correct
   if (cand === null) return null;
   let cur = cand;
   for (const step of REPAIRS) {

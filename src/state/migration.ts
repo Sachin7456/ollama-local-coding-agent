@@ -4,7 +4,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { harnessDir, projectDir } from "../state/session.ts";
+import { harnessDir, projectDir, projectKey } from "../state/session.ts";
 
 const MANIFEST_VERSION = 1;
 const GLOBAL_TO_PERPROJECT = "global_to_perproject_v1";
@@ -53,12 +53,13 @@ function markDone(key: string): void {
  * New per-project:   <projectDir(cwd)>/permissions.json  and  <projectDir(cwd)>/memory.jsonl.
  */
 export function performStartupMigrations(cwd: string): string {
-  if (readManifest().migrations[GLOBAL_TO_PERPROJECT]) return ""; // already migrated
+  const key = `${GLOBAL_TO_PERPROJECT}:${projectKey(cwd)}`; // A10: per-project gate so EVERY project migrates once (not just the first opened)
+  if (readManifest().migrations[key]) return ""; // already migrated for THIS project
 
   const globalPerms = path.join(harnessDir(), "permissions.json");
   const globalMem = path.join(harnessDir(), "memory.jsonl");
   if (!fs.existsSync(globalPerms) && !fs.existsSync(globalMem)) {
-    markDone(GLOBAL_TO_PERPROJECT); // nothing to migrate (fresh install) — don't re-check every startup
+    markDone(key); // nothing to migrate (fresh install) — don't re-check this project every startup
     return "";
   }
 
@@ -100,6 +101,6 @@ export function performStartupMigrations(cwd: string): string {
     /* keep old file; skip */
   }
 
-  markDone(GLOBAL_TO_PERPROJECT);
+  markDone(key);
   return notices.length ? `migrated ${notices.join(" + ")} from the previous global store into this project` : "";
 }

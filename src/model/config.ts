@@ -48,8 +48,6 @@ export interface ModelConfig {
   baseUrl?: string;
   /** Inline override: env var holding the API key (e.g. "GROQ_API_KEY"). Local Ollama needs none. */
   apiKeyEnv?: string;
-  /** Provider's advertised context window (tokens), used for compaction when it differs from numCtx. */
-  contextWindow?: number;
 }
 
 /** A named connection to a model endpoint + account. Models reference one by name (`ModelConfig.connection`).
@@ -71,7 +69,7 @@ export interface HarnessConfig {
   models: Record<string, ModelConfig>;
 }
 
-const AGENTIC_SAMPLING: SamplingParams = {
+export const AGENTIC_SAMPLING: SamplingParams = {
   temperature: 0.1,
   top_p: 0.9,
   top_k: 20,
@@ -149,6 +147,27 @@ function isValidModelRegistry(v: unknown): v is Record<string, ModelConfig> {
   });
 }
 
+
+function withSamplingDefaults(m: ModelConfig): ModelConfig {
+  const s = (m.sampling ?? {}) as Partial<SamplingParams>;
+  const num = (v: unknown, d: number): number => (typeof v === "number" && Number.isFinite(v) ? v : d);
+  return {
+    ...m,
+    sampling: {
+      temperature: num(s.temperature, AGENTIC_SAMPLING.temperature),
+      top_p: num(s.top_p, AGENTIC_SAMPLING.top_p),
+      top_k: num(s.top_k, AGENTIC_SAMPLING.top_k),
+      repeat_penalty: num(s.repeat_penalty, AGENTIC_SAMPLING.repeat_penalty),
+    },
+  };
+}
+
+function normalizeRegistry(raw: Record<string, ModelConfig>): Record<string, ModelConfig> {
+  const out: Record<string, ModelConfig> = {};
+  for (const [tag, m] of Object.entries(raw)) out[tag] = withSamplingDefaults(m);
+  return out;
+}
+
 /**
  * The active model registry. "builtin" returns the in-memory table directly (no
  * I/O — the fast path). "file" reads + caches the JSON file; on ANY problem it
@@ -163,8 +182,9 @@ export function getModels(): Record<string, ModelConfig> {
     const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as unknown;
     const raw = (parsed as { models?: unknown }).models ?? parsed;
     if (isValidModelRegistry(raw)) {
-      fileModelCache.set(file, raw);
-      return raw;
+      const normalized = normalizeRegistry(raw); // A3: fill any missing sampling block so the clients never crash
+      fileModelCache.set(file, normalized);
+      return normalized;
     }
     console.error(`[config] ${file} is not a valid model registry — using built-in models.`);
   } catch {

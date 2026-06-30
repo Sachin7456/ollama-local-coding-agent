@@ -57,15 +57,18 @@ export interface TruncateResult {
  * message contents (file reads, command output) — usually the bulkiest, least dense
  * part of a long context. The most recent tool message is kept verbatim by default.
  *
- * Idempotent: a truncated message ends up shorter than `capChars` (since head < cap),
- * so a second pass changes nothing. Does not mutate the input array/objects.
+ * Idempotent: `head` is clamped to leave room for the truncation marker (head + marker <= capChars), so a truncated
+ * message is always <= capChars and a second pass changes nothing. Does not mutate the input array/objects.
  */
+const TRUNC_MARKER_BUDGET = 48; // worst-case length of "\n…[truncated <N> chars]" — keep head + marker <= capChars
 export function truncateToolResults(
   messages: ChatMessage[],
   capChars = 2000,
   opts: { head?: number; keepLast?: boolean } = {},
 ): TruncateResult {
-  const head = Math.min(opts.head ?? 1500, capChars);
+  // NIT: reserve marker room so a truncated message is always <= capChars (true idempotency even at a tiny cap).
+  const headLimit = Math.max(0, capChars - TRUNC_MARKER_BUDGET);
+  const head = Math.min(opts.head ?? 1500, headLimit);
   const keepLast = opts.keepLast ?? true;
   let lastToolIdx = -1;
   if (keepLast) {

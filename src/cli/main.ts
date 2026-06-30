@@ -23,7 +23,7 @@ import { runOrchestrator } from "../orchestration/orchestrator.ts";
 import { Session, listSessions, validateAndRecoverCwd } from "../state/session.ts";
 import { rememberTool, recallTool, buildMemoryBlock } from "../state/memory.ts";
 import { performStartupMigrations } from "../state/migration.ts";
-import { loadProjectRules, findProjectRulesFile } from "../state/projectRules.ts";
+import { loadProjectRules, projectRulesIdentity } from "../state/projectRules.ts";
 import { readTrustDecision, storeTrustDecision } from "../permissions/workspaceTrust.ts";
 import type { ChatMessage } from "../model/ollamaClient.ts";
 
@@ -105,6 +105,8 @@ function printEvent(e: AgentEvent): void {
   } else if (e.type === "tool_result") {
     const oneLine = e.content.replace(/\s+/g, " ").slice(0, 100);
     console.log(`  ↳ [${e.decision}] ${e.tool}: ${oneLine}`);
+  } else if (e.type === "warning") {
+    console.log(`\n⚠️  ${e.message}`);
   }
 }
 
@@ -123,6 +125,8 @@ function printScoped(scope: string, e: AgentEvent): void {
   } else if (e.type === "compaction") {
     const trimmed = e.truncatedChars ? `, trimmed ${e.truncatedChars} chars` : "";
     console.log(`${tag}  · compacted context (summarized ${e.summarized} msgs${trimmed}) to fit the window`);
+  } else if (e.type === "warning") {
+    console.log(`\n${tag}⚠️  ${e.message}`);
   }
 }
 
@@ -139,6 +143,8 @@ function printEventStreaming(e: AgentEvent): void {
   } else if (e.type === "compaction") {
     const trimmed = e.truncatedChars ? `, trimmed ${e.truncatedChars} chars` : "";
     console.log(`  · compacted context (summarized ${e.summarized} msgs${trimmed}) to fit the window`);
+  } else if (e.type === "warning") {
+    console.log(`\n⚠️  ${e.message}`);
   }
 }
 
@@ -196,11 +202,11 @@ async function main(): Promise<void> {
     }
     for (const w of pf.warnings) console.warn(`⚠️  ${w}`);
   }
-  // A2: multi-agent loads two models at once — warn (don't block) if they likely won't fit in RAM together.
-  if (args.multi) {
-    const memWarn = checkMemoryHeadroom(requiredModels, getModels());
-    if (memWarn) console.warn(`⚠️  ${memWarn}`);
-  }
+  // A9: warn (don't block) if the LOCAL model(s) likely won't fit — single AND multi. Only Ollama-routed models
+  // load locally; remote /v1 (compat) models run on the provider, so exclude them (no spurious warning on a remote run).
+  const localModels = requiredModels.filter(isOllamaTag);
+  const memWarn = checkMemoryHeadroom(localModels, getModels());
+  if (memWarn) console.warn(`⚠️  ${memWarn}`);
 
   // Session persistence: resume an existing transcript or start a fresh one.
   let history: ChatMessage[] = [];
@@ -298,26 +304,26 @@ async function main(): Promise<void> {
   // per-project trust decision — prompt only when such a file exists and there's no decision on record.
   let workspaceTrusted = false;
   {
-    const rulesFile = findProjectRulesFile(ctx.cwd);
-    if (rulesFile) {
-      const decided = readTrustDecision(ctx.cwd);
+    const rules = projectRulesIdentity(ctx.cwd); // A2: name + content hash — trust is bound to this identity
+    if (rules) {
+      const decided = readTrustDecision(ctx.cwd, rules);
       if (decided !== null) {
         workspaceTrusted = decided;
       } else if (stdin.isTTY) {
         workspaceTrusted = parseTrustReply(
           await rl.question(
-            `\n🔐 "${rulesFile}" in this folder will be added to the model's instructions.\n   Trust this workspace and load it?  (y = yes · N = no) `,
+            `\n🔐 "${rules.name}" in this folder will be added to the model's instructions.\n   Trust this workspace and load it?  (y = yes · N = no) `,
           ),
         );
-        if (storeTrustDecision(ctx.cwd, workspaceTrusted)) {
-          console.log(workspaceTrusted ? `  (trusted — ${rulesFile} will be loaded)` : `  (not trusted — ${rulesFile} will be ignored)`);
+        if (storeTrustDecision(ctx.cwd, workspaceTrusted, rules)) {
+          console.log(workspaceTrusted ? `  (trusted — ${rules.name} will be loaded)` : `  (not trusted — ${rules.name} will be ignored)`);
         } else {
           // this session still honours the choice; we just couldn't persist it, so we'll ask again next time
           console.warn(`  ⚠️  couldn't save the trust decision (disk/permissions?); you'll be asked again next time.`);
         }
       } else {
         // non-interactive first run: can't prompt → untrusted; do NOT persist (decide interactively later)
-        console.error(`⛔ non-interactive: ignoring ${rulesFile} (workspace not trusted; re-run interactively to decide).`);
+        console.error(`⛔ non-interactive: ignoring ${rules.name} (workspace not trusted; re-run interactively to decide).`);
       }
     }
   }
@@ -347,6 +353,7 @@ async function main(): Promise<void> {
               onAsk,
               onEvent: printScoped,
               maxWorkerTurns: 10,
+              projectRules, // A8: a trusted project's rules apply in multi-agent mode too
               signal: ac.signal,
             },
             maxTurns: args.maxTurns ?? 25,

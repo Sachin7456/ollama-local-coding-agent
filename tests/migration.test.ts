@@ -56,6 +56,21 @@ test("fresh install (no legacy files) → no-op, no crash", () => {
   assert.ok(fs.existsSync(path.join(tmp, ".migration-manifest.json"))); // marked done so it won't re-check forever
 });
 
+test("A10: every project migrates the legacy global store on its first open (not just the first-opened)", () => {
+  writeGlobal(
+    { allow: [{ tool: "bash", commandPrefix: "npm test" }] },
+    [JSON.stringify({ text: "shared fact", ts: "2026-06-01T00:00:00Z" })],
+  );
+  const projA = path.join(tmp, "alpha");
+  const projB = path.join(tmp, "beta"); // distinct projectKey (no .git → path-based)
+  assert.match(performStartupMigrations(projA), /migrated/);
+  assert.match(performStartupMigrations(projB), /migrated/); // pre-fix: projB returned "" (globally gated, skipped)
+  assert.ok(fs.existsSync(path.join(projectDir(projA), "permissions.json")));
+  assert.ok(fs.existsSync(path.join(projectDir(projB), "permissions.json")));
+  assert.equal(performStartupMigrations(projA), ""); // per-project idempotent
+  assert.equal(performStartupMigrations(projB), "");
+});
+
 test("never overwrites an existing per-project file (fail-safe)", () => {
   writeGlobal({ allow: [{ tool: "bash", commandPrefix: "rm -rf node_modules" }] }, []);
   const dir = projectDir(cwd);

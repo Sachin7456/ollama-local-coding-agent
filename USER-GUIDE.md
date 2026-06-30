@@ -104,6 +104,12 @@ you point the tool at it using **two small files in the project folder** (the fo
 > action instead of calling it** (it re-prompts with the exact call format), but smaller models stay
 > best-effort — for real work, use 7B+. (If a model gets stuck repeating the same action, the harness
 > stops it with `[stopped: loop]` instead of grinding on.)
+>
+> **Remote `/v1` endpoints must forward tools too.** The model isn't the only thing that needs tool support —
+> the endpoint does as well. Some hosted `/v1` gateways silently **strip the `tools` parameter**, so even a
+> tool-capable model only chats/narrates. If the harness sees tools offered but never called for a whole run, it
+> prints `⚠️ … may not support function-calling` — switch to a local Ollama coder model, or a `/v1` provider that
+> forwards tools (e.g. Groq).
 
 **Step A — pull the model in Ollama** (use your model's real tag; `ollama list` shows what you have):
 ```

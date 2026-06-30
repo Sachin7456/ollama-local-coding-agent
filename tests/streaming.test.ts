@@ -114,3 +114,77 @@ test("runAgent with stream:true streams tokens and completes", async () => {
     await srv.close();
   }
 });
+
+// ---------- A7: streaming timeout is an IDLE/STALL guard, not a total deadline ----------
+function delayedNdjson(chunks: Array<{ text: string; afterMs: number }>) {
+  const server = http.createServer((req, res) => {
+    res.setHeader("content-type", "application/x-ndjson");
+    let i = 0;
+    const writeNext = (): void => {
+      if (i >= chunks.length) {
+        res.end();
+        return;
+      }
+      const c = chunks[i++];
+      setTimeout(() => {
+        res.write(c.text + "\n");
+        writeNext();
+      }, c.afterMs);
+    };
+    req.on("data", () => {});
+    req.on("end", writeNext);
+  });
+  return new Promise<{ client: OllamaClient; close: () => Promise<void> }>((resolve) => {
+    server.listen(0, "127.0.0.1", () => {
+      const { port } = server.address() as AddressInfo;
+      resolve({
+        client: new OllamaClient(`http://127.0.0.1:${port}`, { retry: { maxRetries: 0 } }),
+        close: () => new Promise<void>((r) => server.close(() => r())),
+      });
+    });
+  });
+}
+
+test("A7: a slow-but-steady stream completes under a small idle timeout (not a total deadline)", async () => {
+  const srv = await delayedNdjson([
+    { text: J({ message: { content: "A" }, done: false }), afterMs: 25 },
+    { text: J({ message: { content: "B" }, done: false }), afterMs: 25 },
+    { text: J({ message: { content: "C" }, done: false }), afterMs: 25 },
+    { text: J({ message: { content: "D" }, done: false }), afterMs: 25 },
+    { text: J({ message: { content: "E" }, done: false }), afterMs: 25 },
+    { text: J({ done: true, prompt_eval_count: 1, eval_count: 1 }), afterMs: 25 },
+  ]);
+  try {
+    // total ~150ms exceeds timeoutMs:120, but each inter-chunk gap (~25ms) is well under it → kick() keeps it alive.
+    // Wide per-gap margin (95ms) so scheduling jitter under full-suite load can't trip the idle watchdog.
+    const res = await srv.client.chatStream(
+      { model: "qwen2.5-coder:7b", messages: [{ role: "user", content: "x" }], timeoutMs: 120 },
+      () => {},
+    );
+    assert.equal(res.text, "ABCDE");
+  } finally {
+    await srv.close();
+  }
+});
+
+test("A7: a stalled stream aborts with a TimeoutError", async () => {
+  const server = http.createServer((req, res) => {
+    res.setHeader("content-type", "application/x-ndjson");
+    req.on("data", () => {});
+    req.on("end", () => {
+      res.write(J({ message: { content: "A" }, done: false }) + "\n"); // one chunk, then never end → idle stall
+    });
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const { port } = server.address() as AddressInfo;
+  const client = new OllamaClient(`http://127.0.0.1:${port}`, { retry: { maxRetries: 0 } });
+  try {
+    await assert.rejects(
+      () => client.chatStream({ messages: [{ role: "user", content: "x" }], timeoutMs: 50 }, () => {}),
+      (e: unknown) => (e as Error)?.name === "TimeoutError" || /idle/.test(String((e as Error)?.message)),
+    );
+  } finally {
+    server.closeAllConnections?.();
+    await new Promise<void>((r) => server.close(() => r()));
+  }
+});

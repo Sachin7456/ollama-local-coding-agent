@@ -5,7 +5,8 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
-import { CompatClient, parseCompatResponse } from "../src/model/compatClient.ts";
+import { CompatClient, parseCompatResponse, stripOrphanedToolCalls } from "../src/model/compatClient.ts";
+import type { ChatMessage } from "../src/model/ollamaClient.ts";
 
 // Make these tests independent of any local .env / models.json: force the BUILTIN registry so resolveModel()
 // always finds MODEL, regardless of the developer's file-source config. (No real API / key — all mocked.)
@@ -128,6 +129,69 @@ test("mapOut sends assistant tool_calls[].id + tool tool_call_id + stringified a
   }
 });
 
+test("A1 stripOrphanedToolCalls: keeps paired, drops orphan call/result, keeps text", () => {
+  const paired: ChatMessage[] = [
+    { role: "user", content: "go" },
+    { role: "assistant", content: "", tool_calls: [{ id: "c1", function: { name: "grep", arguments: {} } }] },
+    { role: "tool", content: "r", tool_name: "grep", tool_call_id: "c1" },
+  ];
+  assert.deepEqual(stripOrphanedToolCalls(paired), paired); // fully paired -> unchanged
+
+  const withText = stripOrphanedToolCalls([
+    { role: "assistant", content: "thinking", tool_calls: [{ id: "x", function: { name: "grep", arguments: {} } }] },
+  ]);
+  assert.equal(withText.length, 1);
+  assert.equal(withText[0].tool_calls, undefined); // orphan call dropped, content kept
+  assert.equal(withText[0].content, "thinking");
+
+  assert.deepEqual(
+    stripOrphanedToolCalls([{ role: "assistant", content: "", tool_calls: [{ id: "x", function: { name: "grep", arguments: {} } }] }]),
+    [], // all-orphan + empty content -> message dropped
+  );
+
+  const partial = stripOrphanedToolCalls([
+    { role: "assistant", content: "", tool_calls: [{ id: "a", function: { name: "grep", arguments: {} } }, { id: "b", function: { name: "read", arguments: {} } }] },
+    { role: "tool", content: "ra", tool_name: "grep", tool_call_id: "a" },
+  ]);
+  const asst = partial.find((m) => m.role === "assistant");
+  assert.equal(asst?.tool_calls?.length, 1);
+  assert.equal(asst?.tool_calls?.[0].id, "a"); // keep the paired call, drop the orphan
+
+  assert.deepEqual(
+    stripOrphanedToolCalls([{ role: "tool", content: "r", tool_name: "grep", tool_call_id: "ghost" }]),
+    [], // orphan result -> dropped
+  );
+});
+
+test("A1 chat() strips a dangling tool_call so a strict /v1 provider does not 400", async () => {
+  // strict mock: 400 if any assistant tool_call has no following tool result (mimics a real /v1 provider)
+  const srv = await mockServer((body: any) => {
+    const msgs = body?.messages ?? [];
+    const resultIds = new Set(msgs.filter((m: any) => m.role === "tool").map((m: any) => m.tool_call_id));
+    for (const m of msgs) {
+      if (m.role === "assistant" && Array.isArray(m.tool_calls)) {
+        for (const c of m.tool_calls) if (!resultIds.has(c.id)) return { status: 400, text: "tool_calls must be followed by tool messages" };
+      }
+    }
+    return { json: { choices: [{ message: { content: "ok" } }] } };
+  });
+  try {
+    const r = await new CompatClient(srv.url, undefined, FAST).chat({
+      model: MODEL,
+      messages: [
+        { role: "user", content: "go" },
+        { role: "assistant", content: "I'll grep", tool_calls: [{ id: "orphan", function: { name: "grep", arguments: {} } }] },
+        { role: "user", content: "next" },
+      ],
+    });
+    assert.equal(r.text, "ok"); // strip removed the orphan -> no 400
+    const sent = srv.lastBody().messages;
+    assert.ok(!sent.some((m: any) => m.role === "assistant" && Array.isArray(m.tool_calls))); // orphan tool_calls gone
+  } finally {
+    await srv.close();
+  }
+});
+
 test("a missing API key throws a clear error BEFORE any request", async () => {
   delete process.env.NOPE_KEY;
   await assert.rejects(
@@ -162,6 +226,25 @@ test("5xx -> retried then succeeds", async () => {
     const r = await new CompatClient(srv.url, undefined, FAST).chat({ model: MODEL, messages: [{ role: "user", content: "x" }] });
     assert.equal(r.text, "ok");
     assert.equal(calls, 2);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("a 200 + provider error envelope -> clear hard error, NOT retried", async () => {
+  // Some /v1 gateways answer HTTP 200 with {"error":{...}} instead of a completion. Surface it, don't silently
+  // treat it as an empty turn.
+  let calls = 0;
+  const srv = await mockServer(() => {
+    calls++;
+    return { json: { error: { type: "llm_call_failed", message: "Operation not allowed" } } };
+  });
+  try {
+    await assert.rejects(
+      () => new CompatClient(srv.url, undefined, FAST).chat({ model: MODEL, messages: [{ role: "user", content: "x" }] }),
+      /provider error.*Operation not allowed/,
+    );
+    assert.equal(calls, 1); // permanent -> fail fast, no retry
   } finally {
     await srv.close();
   }

@@ -6,7 +6,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { getModels, resolveModel, resolveWorkerModel, fileRegistryModels, MODELS, DEFAULT_MODEL_SOURCE } from "../src/model/config.ts";
+import { getModels, resolveModel, resolveWorkerModel, fileRegistryModels, MODELS, DEFAULT_MODEL_SOURCE, AGENTIC_SAMPLING } from "../src/model/config.ts";
+import { buildChatRequest } from "../src/model/ollamaClient.ts";
 import { loadDotEnv } from "../src/cli/loadEnv.ts";
 
 const S = { temperature: 0.1, top_p: 0.9, top_k: 20, repeat_penalty: 1.05 };
@@ -47,6 +48,40 @@ test("file source loads model definitions from a JSON file", () => {
   assert.equal(resolveModel("my-model:1").numCtx, 4096);
   // default falls back to the first key when the built-in default isn't in the file
   assert.equal(resolveModel().name, "my-model:1");
+});
+
+test("A3: a file model with NO sampling block loads with agentic defaults (no first-turn crash)", () => {
+  const file = writeModelsFile({
+    models: { "nosamp:1": { name: "nosamp:1", role: "general", numCtx: 4096, keepAlive: "5m", approxSizeGB: 3 } },
+  });
+  process.env.QWEN_HARNESS_MODEL_SOURCE = "file";
+  process.env.QWEN_HARNESS_MODELS_FILE = file;
+  assert.deepEqual(getModels()["nosamp:1"].sampling, AGENTIC_SAMPLING);
+  // the Ollama request builder dereferences sampling.* — it must not throw now
+  assert.equal(buildChatRequest({ model: "nosamp:1", messages: [] }).options.temperature, AGENTIC_SAMPLING.temperature);
+});
+
+test("A3: a partial sampling block fills only the missing fields", () => {
+  const file = writeModelsFile({
+    models: { "part:1": { name: "part:1", role: "general", numCtx: 4096, keepAlive: "5m", approxSizeGB: 3, sampling: { temperature: 0.7 } } },
+  });
+  process.env.QWEN_HARNESS_MODEL_SOURCE = "file";
+  process.env.QWEN_HARNESS_MODELS_FILE = file;
+  const s = getModels()["part:1"].sampling;
+  assert.equal(s.temperature, 0.7); // kept
+  assert.equal(s.top_p, AGENTIC_SAMPLING.top_p); // filled
+  assert.equal(s.top_k, AGENTIC_SAMPLING.top_k);
+  assert.equal(s.repeat_penalty, AGENTIC_SAMPLING.repeat_penalty);
+});
+
+test("A3: a full sampling block is preserved unchanged", () => {
+  const full = { temperature: 0.33, top_p: 0.5, top_k: 11, repeat_penalty: 1.2 };
+  const file = writeModelsFile({
+    models: { "full:1": { name: "full:1", role: "general", numCtx: 4096, keepAlive: "5m", approxSizeGB: 3, sampling: full } },
+  });
+  process.env.QWEN_HARNESS_MODEL_SOURCE = "file";
+  process.env.QWEN_HARNESS_MODELS_FILE = file;
+  assert.deepEqual(getModels()["full:1"].sampling, full);
 });
 
 test("file source also accepts a bare registry (no 'models' wrapper)", () => {

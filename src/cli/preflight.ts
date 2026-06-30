@@ -22,17 +22,27 @@ export function checkMemoryHeadroom(
   totalMemBytes: number = os.totalmem(),
 ): string | null {
   let sumGB = 0;
+  let counted = 0;
   for (const tag of requiredModels) {
     const gb = models[tag]?.approxSizeGB;
-    if (typeof gb === "number" && gb > 0) sumGB += gb;
+    if (typeof gb === "number" && gb > 0) {
+      sumGB += gb;
+      counted++;
+    }
   }
   if (sumGB <= 0) return null; // unknown sizes — don't guess
   const neededGB = sumGB * 1.2;
   const haveGB = totalMemBytes / 1e9;
   if (neededGB <= haveGB) return null;
+  const multi = counted > 1; // A9: singular vs plural advice (a single oversized model now warns too)
+  const subject = multi ? "the selected models need" : "the selected model needs";
+  const action = multi ? "loading them together" : "loading it";
+  const advice = multi
+    ? "Use a smaller model, single-agent mode, or fewer models."
+    : "Use a smaller model or a lighter quantization.";
   return (
-    `the selected models need ~${neededGB.toFixed(1)} GB but this machine has ~${haveGB.toFixed(1)} GB RAM — ` +
-    `loading them together may exhaust memory and kill the run. Use a smaller model, single-agent mode, or fewer models.`
+    `${subject} ~${neededGB.toFixed(1)} GB but this machine has ~${haveGB.toFixed(1)} GB RAM — ` +
+    `${action} may exhaust memory and kill the run. ${advice}`
   );
 }
 

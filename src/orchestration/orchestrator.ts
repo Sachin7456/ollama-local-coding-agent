@@ -34,6 +34,11 @@ const WORKER_PROMPT = `You are a worker agent with a single, self-contained task
 - read_file a file before edit_file. Be concise.
 - When done, reply with a short result summary (no tool call).`;
 
+/** A8: append a trusted per-project rules block to a base system prompt (role framing first, rules last for recency). */
+function withProjectRules(base: string, projectRules?: string): string {
+  return projectRules ? `${base}\n\n${projectRules}` : base;
+}
+
 export interface OrchestratorDeps {
   client: ModelClient;
   permissions: PermissionEngine;
@@ -47,6 +52,8 @@ export interface OrchestratorDeps {
   /** scoped event observer: scope is "orchestrator" or "worker#N" */
   onEvent?: (scope: string, ev: AgentEvent) => void;
   maxWorkerTurns?: number;
+  /** A8: trusted per-project rules block folded into the orchestrator + worker system prompts ("" / undefined = none). */
+  projectRules?: string;
   /** abort the orchestrator AND all workers' in-flight requests (Ctrl+C / exit) */
   signal?: AbortSignal;
 }
@@ -94,7 +101,7 @@ export function makeSpawnAgentsTool(deps: OrchestratorDeps): Tool {
               permissions: deps.permissions,
               ctx: subCtx,
               model: deps.workerModel,
-              systemPrompt: WORKER_PROMPT,
+              systemPrompt: withProjectRules(WORKER_PROMPT, deps.projectRules),
               userMessage: task,
               gate: deps.gate,
               onAsk: deps.onAsk,
@@ -140,7 +147,7 @@ export async function runOrchestrator(opts: {
     permissions: deps.permissions,
     ctx: deps.ctx,
     model: deps.orchestratorModel,
-    systemPrompt: ORCHESTRATOR_PROMPT,
+    systemPrompt: withProjectRules(ORCHESTRATOR_PROMPT, deps.projectRules),
     userMessage: opts.task,
     gate: deps.gate,
     onAsk: deps.onAsk,

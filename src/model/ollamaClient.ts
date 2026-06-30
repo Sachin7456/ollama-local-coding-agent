@@ -11,7 +11,7 @@
 
 import { randomUUID } from "node:crypto";
 import { resolveModel, OLLAMA_BASE_URL, type ModelConfig } from "../model/config.ts";
-import { type RetryConfig, RETRY_DEFAULTS, retryWithBackoff } from "./retry.ts";
+import { type RetryConfig, RETRY_DEFAULTS, retryWithBackoff, idleWatchdog } from "./retry.ts";
 import { looseParseObject } from "./jsonRepair.ts";
 import type { ModelClient } from "./modelClient.ts";
 
@@ -209,26 +209,36 @@ export class OllamaClient implements ModelClient {
    */
   async chatStream(opts: ChatOptions, onDelta: (chunk: string) => void): Promise<ChatResult> {
     const body = { ...buildChatRequest(opts), stream: true };
+    const idleMs = opts.timeoutMs && opts.timeoutMs > 0 ? opts.timeoutMs : 0;
     // Retry ONLY the connect (fetch + res.ok). The stream is read OUTSIDE the retry: mid-stream reader.read()
-    // errors are NOT retried — stream-start is the retryable part, mid-body failures are rare, and retrying would
-    // RE-EMIT already-delivered onDelta chunks. (A fresh per-attempt timeout, if set, resets on each retry.)
-    const res = await retryWithBackoff(async () => {
-      const r = await fetch(`${this.baseUrl}/api/chat`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-        signal: this._attemptSignal(opts),
-      });
-      if (!r.ok) {
-        const detail = await r.text().catch(() => "");
-        throw Object.assign(
-          new Error(`Ollama /api/chat (stream) failed: ${r.status} ${r.statusText} ${detail}`.trim()),
-          { status: r.status },
-        );
+    // errors are NOT retried — retrying would RE-EMIT already-delivered onDelta chunks. A7: `timeoutMs` is an
+    // IDLE/STALL guard (reset per chunk via wd.kick()), NOT a total deadline — a healthy long stream completes.
+    const { res, wd } = await retryWithBackoff(async () => {
+      const w = idleWatchdog(idleMs, opts.signal); // fresh per attempt (fresh connect timeout)
+      try {
+        const r = await fetch(`${this.baseUrl}/api/chat`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+          signal: w.signal,
+        });
+        if (!r.ok) {
+          const detail = await r.text().catch(() => "");
+          throw Object.assign(
+            new Error(`Ollama /api/chat (stream) failed: ${r.status} ${r.statusText} ${detail}`.trim()),
+            { status: r.status },
+          );
+        }
+        return { res: r, wd: w };
+      } catch (err) {
+        w.clear(); // failed attempt: stop its timer before any retry
+        throw err;
       }
-      return r;
     }, opts.signal, this.retry);
-    if (!res.body) throw new Error("Ollama returned no response body for streaming.");
+    if (!res.body) {
+      wd.clear();
+      throw new Error("Ollama returned no response body for streaming.");
+    }
 
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
@@ -266,17 +276,23 @@ export class OllamaClient implements ModelClient {
       if (typeof obj.eval_count === "number") evalTokens = obj.eval_count;
     };
 
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      let nl: number;
-      while ((nl = buffer.indexOf("\n")) >= 0) {
-        handleLine(buffer.slice(0, nl));
-        buffer = buffer.slice(nl + 1);
+    wd.kick(); // A7: give the FIRST chunk a full idle window (prompt-eval latency before the first token)
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        wd.kick(); // chunk arrived → reset the idle deadline (stall guard, not a total deadline)
+        buffer += decoder.decode(value, { stream: true });
+        let nl: number;
+        while ((nl = buffer.indexOf("\n")) >= 0) {
+          handleLine(buffer.slice(0, nl));
+          buffer = buffer.slice(nl + 1);
+        }
       }
+      if (buffer.trim()) handleLine(buffer); // any trailing line without newline
+    } finally {
+      wd.clear();
     }
-    if (buffer.trim()) handleLine(buffer); // any trailing line without newline
 
     return {
       text,

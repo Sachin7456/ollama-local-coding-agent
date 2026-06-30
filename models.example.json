@@ -5,7 +5,7 @@
     "local": { "type": "ollama", "baseUrl": "http://127.0.0.1:11434" },
     "remote-ollama": { "type": "compat", "baseUrl": "https://api.example.com/v1", "apiKeyEnv": "GROQ_API_KEY" }
   },
-  "//compat": "External /v1 (compat) providers land in the next release. Shape (for when ready): \"groq-work\": { \"type\": \"compat\", \"baseUrl\": \"https://api.example.com/v1\", \"apiKeyEnv\": \"GROQ_WORK\" } — the key itself goes in .env, only the env-var NAME goes here.",
+  "//compat": "External /v1 (compat) providers are available now. Example shape: \"groq-work\": { \"type\": \"compat\", \"baseUrl\": \"https://api.example.com/v1\", \"apiKeyEnv\": \"GROQ_WORK\" } — the key itself goes in .env, only the env-var NAME goes here.",
   "models": {
     "your-model:tag": {
       "name": "your-model:tag",
