@@ -256,6 +256,19 @@ implemented across many open-source projects. We credit those foundations here, 
 | Session persistence (append-only transcript + resume) | [Plandex](https://github.com/plandex-ai/plandex) (MIT) · [Cline](https://github.com/cline/cline) (Apache-2.0) |
 | Orchestrator → workers + concurrency cap | [AutoGen](https://github.com/microsoft/autogen) (MIT) · [CrewAI](https://github.com/crewAIInc/crewAI) (MIT) · [LangGraph](https://github.com/langchain-ai/langgraph) (MIT) · [CAMEL](https://github.com/camel-ai/camel) (Apache-2.0) |
 | Verifier / judge (planned) | [FastChat `llm_judge`](https://github.com/lm-sys/FastChat) (Apache-2.0) · [Reflexion](https://github.com/noahshinn/reflexion) (MIT) |
+| Terminal styling via raw ANSI/SGR + color-capability detection (isTTY / `NO_COLOR` / `FORCE_COLOR`) | [ECMA-48 / ANSI escape codes](https://en.wikipedia.org/wiki/ANSI_escape_code) · [NO_COLOR standard](https://no-color.org/) · [Command Line Interface Guidelines (clig.dev)](https://clig.dev/) |
+| Terminal display-width measurement (0/1/2-cell codepoints; ANSI-aware wrap) | [Unicode UAX #11 East Asian Width](https://www.unicode.org/reports/tr11/) · [wcwidth](https://github.com/jquast/wcwidth) (MIT) |
+| Slash-command registry → `/help` + Tab-autocomplete + persisted history | [Node.js `readline`/`repl` docs](https://nodejs.org/api/readline.html) (`completer`, `history` event) · [clig.dev](https://clig.dev/) |
+| User preferences / state under a home config dir | [XDG Base Directory Specification](https://specifications.freedesktop.org/basedir/latest/) |
+| Raw-mode interactive input — menus/palette, reverse-search, multi-line, live spinner | [Node.js `readline` docs](https://nodejs.org/api/readline.html) (`emitKeypressEvents`, `setRawMode`, `cursorTo`/`moveCursor`/`clearScreenDown`) · [Command Line Interface Guidelines (clig.dev)](https://clig.dev/) |
+| Fuzzy subsequence matching for `@file` mentions | [approximate string matching](https://en.wikipedia.org/wiki/Approximate_string_matching) (subsequence technique, as used by fuzzy finders) |
+| Bracketed paste (capture a paste as one block; collapse large pastes to a placeholder) | [xterm control sequences (DEC mode 2004)](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html) · [Bracketed paste](https://en.wikipedia.org/wiki/Bracketed-paste) |
+| Input line-editing comforts — kill-ring + yank, incremental undo, word-wise motion/kill | [GNU Readline manual](https://tiswww.case.edu/php/chet/readline/rluserman.html) (kill-ring `C-y`/`M-y`, undo `C-_`) · [ECMA-48 CSI](https://ecma-international.org/publications-and-standards/standards/ecma-48/) (cursor/erase for redraw) |
+| Inline "ghost text" autosuggestion from history (dim suffix; →/End accepts) | [fish shell — autosuggestions](https://fishshell.com/docs/current/interactive.html) · [zsh-autosuggestions](https://github.com/zsh-users/zsh-autosuggestions) (history-prefix strategy) |
+| Local token/cost estimate (tokens × a per-model price table, labeled an estimate) | [ccusage](https://ccusage.com/) (client-side cost-from-tokens estimation pattern) |
+| Arrow-key approval dialog + Shift+Tab mode cycling | [@inquirer/select](https://www.npmjs.com/package/@inquirer/select) (list keymap: ↑/↓ + Enter) · [xterm ctlseqs](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html) (Back-Tab / CBT `\x1b[Z`) |
+| Line diff (added/removed lines for the `+N -N` edit summary) | [Longest-common-subsequence / Myers diff](https://en.wikipedia.org/wiki/Longest_common_subsequence) |
+| Rounded box-drawing (search field / panels) | [Unicode Box Drawing block (U+2500–U+257F)](https://en.wikipedia.org/wiki/Box-drawing_characters) |
 
 With thanks to the authors and maintainers of the projects above. If you maintain one of these
 and would like the credit adjusted, please open an issue.

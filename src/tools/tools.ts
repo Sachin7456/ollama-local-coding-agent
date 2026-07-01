@@ -11,6 +11,7 @@
 import fs from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import path from "node:path";
+import { computeLineDiff } from "../ui/diff.ts";
 import { exec, execFile } from "node:child_process";
 import type { ToolDef } from "../model/ollamaClient.ts";
 
@@ -384,6 +385,12 @@ export const writeFileTool: Tool = {
         /* ENOENT → new file, ok to create */
       }
     }
+    let prevContent = "";
+    try {
+      prevContent = await fs.readFile(abs, "utf8"); // for the +N -N diff (empty for a new file)
+    } catch {
+      /* new file → no previous content */
+    }
     try {
       await fs.mkdir(path.dirname(abs), { recursive: true });
       await fs.writeFile(abs, content, "utf8");
@@ -398,7 +405,8 @@ export const writeFileTool: Tool = {
         /* ignore */
       }
     }
-    return `Wrote ${Buffer.byteLength(content, "utf8")} bytes to ${rel}.`;
+    const wdiff = computeLineDiff(prevContent, content, rel);
+    return `Wrote ${Buffer.byteLength(content, "utf8")} bytes to ${rel}.` + (wdiff ? "\n" + wdiff : "");
   },
 };
 
@@ -520,7 +528,8 @@ export const editFileTool: Tool = {
             /* ignore */
           }
         }
-        return `Edited ${rel} (1 replacement, matched ignoring whitespace).`;
+        const wsdiff = computeLineDiff(content, rebuilt, rel);
+        return `Edited ${rel} (1 replacement, matched ignoring whitespace).` + (wsdiff ? "\n" + wsdiff : "");
       }
       if (starts.length > 1) {
         return `Error: old_string not found exactly; a whitespace-insensitive match is ambiguous (${starts.length} candidates) in ${rel}. Provide more exact/surrounding text.`;
@@ -545,7 +554,8 @@ export const editFileTool: Tool = {
         /* ignore */
       }
     }
-    return `Edited ${rel} (${args.replace_all ? `${count} replacements` : "1 replacement"}).`;
+    const ediff = computeLineDiff(content, updated, rel);
+    return `Edited ${rel} (${args.replace_all ? `${count} replacements` : "1 replacement"}).` + (ediff ? "\n" + ediff : "");
   },
 };
 
@@ -646,7 +656,8 @@ export const multiEditTool: Tool = {
         /* ignore */
       }
     }
-    return `Edited ${rel} (${edits.length} edits applied, ${totalReplacements} replacements).`;
+    const mdiff = computeLineDiff(content, working, rel);
+    return `Edited ${rel} (${edits.length} edits applied, ${totalReplacements} replacements).` + (mdiff ? "\n" + mdiff : "");
   },
 };
 

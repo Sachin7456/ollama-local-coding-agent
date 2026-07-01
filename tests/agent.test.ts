@@ -916,6 +916,24 @@ test("A11: the idle/narration nudge is not orphaned on the final turn (still end
   }
 });
 
+test("C1: emits a context event (usedTokens + numCtx) after each generation when compaction is set", async () => {
+  const m = await scriptedModel((i) => (i === 0 ? { content: "hi" } : { content: "done" }));
+  try {
+    const events: any[] = [];
+    await runAgent({
+      client: m.client, registry: createDefaultRegistry(), permissions: createDefaultPermissions("default"),
+      ctx: { cwd: tmp }, userMessage: "go", model: "qwen2.5-coder:7b", maxTurns: 1,
+      compaction: { numCtx: 100, threshold: 0.75 }, onEvent: (e) => events.push(e),
+    });
+    const ctx = events.find((e) => e.type === "context");
+    assert.ok(ctx, "a context event should be emitted");
+    assert.equal(ctx.numCtx, 100);
+    assert.equal(typeof ctx.usedTokens, "number");
+  } finally {
+    await m.close();
+  }
+});
+
 test("HW: warns once when tools are offered but the model only narrates (endpoint ignoring tools)", async () => {
   // Model narrates every turn, never emits a real tool call — like a /v1 endpoint that strips the tools param.
   const m = await scriptedModel(() => ({ content: "Let me read the file config.ts to find the answer." }));

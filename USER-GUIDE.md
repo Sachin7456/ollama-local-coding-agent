@@ -228,10 +228,23 @@ You'll see a few lines like these:
 ```
 qwen-harness  —  single (qwen2.5-coder:7b)  |  perms: default  |  cwd: path/to/your/project
 session: a1b2c3d4   (resume later:  npm start -- --resume a1b2c3d4)
-commands: /exit  /model <tag>  /mode <mode>  /models  /sessions  /new
+commands: /help  /model  /models  /mode  /context  /sessions  /new  /theme  /clear  /perms  /exit   (/help for details)
 >
 ```
-The `>` is your prompt. Type there.
+The `>` is your prompt. Type there. Above it, a status line shows the model, mode, folder, and how full the
+context window is.
+
+> **Nice touches (on by default in a terminal):** a live `/` command menu with **argument submenus** (`/mode`,
+> `/theme`); **@** file mentions; fish-style **ghost-text** suggestions from your history (press → or End to accept);
+> multi-line input; **paste** big blocks (they collapse to `[Pasted text #N]` and expand when you send);
+> **undo/redo** (Ctrl+Z / Ctrl+_); a **kill-ring** (Ctrl+K/U/W → Ctrl+Y) with word-wise editing (Ctrl+←/→, Alt+D);
+> Ctrl+R history search; and a `!`-prefixed **shell** escape. Tool approvals are an **↑/↓ + Enter** menu (allow once /
+> always / deny), **Shift+Tab** cycles the permission mode, and a live **↑in ↓out** token counter shows per turn + in
+> the status line. See your token usage with **`/cost`** and search the conversation with **`/search <text>`**.
+> Name a chat with **`/rename <title>`**, then **`/resume`** and **`/model`** are **searchable** (type to filter).
+> Answers render as colorized Markdown; edits show a colored diff with a **`+N -N`** added/removed summary.
+> Type **`/help`** any time. Prefer plain text / the classic line editor? Set `NO_COLOR=1` (or `/theme never`), and
+> use `QWEN_HARNESS_PLAIN_INPUT=1` for the plain readline REPL (Tab-complete + ↑/↓ history).
 
 ---
 
@@ -429,8 +442,18 @@ then exits.
 | Resume a past chat | `npm start -- --resume <id>` |
 | List past chats | `npm start -- --list-sessions` |
 | Start in a chosen mode | `npm start -- --mode acceptEdits` |
+| (in chat) see all commands | `/help` |
 | (in chat) switch model | `/model qwen3-coder:30b` |
-| (in chat) change mode | `/mode acceptEdits` |
+| (in chat) pick a model from a list | `/model` (no argument → picker) |
+| (in chat) save a default model | `/model qwen3-coder:30b --persist` |
+| (in chat) check context usage | `/context` |
+| (in chat) color on/off | `/theme never` (or `auto` / `always`) |
+| (in chat) clear the screen | `/clear` |
+| (in chat) switch to another chat | `/resume` (picker) |
+| (in chat) free up context | `/compact` |
+| (in chat) compose in your editor | `/editor` |
+| (in chat) run a shell command | `!ls -la` |
+| (in chat) change mode | `/mode acceptEdits` (or bare `/mode` to cycle) |
 | (in chat) list chats | `/sessions` |
 | (in chat) start fresh | `/new` |
 | (in chat) quit | `/exit` |

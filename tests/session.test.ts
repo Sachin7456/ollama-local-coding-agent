@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
-import { Session, listSessions, validateAndRecoverCwd } from "../src/state/session.ts";
+import { Session, listSessions, validateAndRecoverCwd, setSessionTitle, sessionTitle } from "../src/state/session.ts";
 import { OllamaClient } from "../src/model/ollamaClient.ts";
 import { runAgent } from "../src/agent/agent.ts";
 import { createDefaultRegistry } from "../src/tools/tools.ts";
@@ -22,6 +22,18 @@ before(async () => {
 after(async () => {
   delete process.env.QWEN_HARNESS_DIR;
   if (tmp) await fs.rm(tmp, { recursive: true, force: true });
+});
+
+test("session titles: create / rename (append-only) / load + sessionTitle + listSessions", () => {
+  const s = Session.create({ cwd: tmp, title: "My task" });
+  s.appendMessage({ role: "user", content: "hello world" });
+  assert.equal(Session.load(s.id).meta.title, "My task");
+  setSessionTitle(s.id, "Renamed"); // appends a title line; latest wins
+  assert.equal(Session.load(s.id).meta.title, "Renamed");
+  assert.equal(sessionTitle({ title: "T", firstUser: "f" }), "T");
+  assert.equal(sessionTitle({ firstUser: "first msg" }), "first msg");
+  assert.equal(sessionTitle({}), "(untitled)");
+  assert.equal(listSessions(tmp).find((r) => r.id === s.id)?.title, "Renamed");
 });
 
 function jsonModel(reply: (callIndex: number) => string) {

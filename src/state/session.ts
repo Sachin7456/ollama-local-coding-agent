@@ -18,6 +18,7 @@ export interface SessionMeta {
   createdAt: string;
   model?: string;
   cwd?: string;
+  title?: string; // user-given name (via /rename), for search/resume
 }
 
 export interface SessionSummary {
@@ -25,6 +26,15 @@ export interface SessionSummary {
   createdAt: string;
   messages: number;
   firstUser: string;
+  title?: string;
+}
+
+/** Display label for a session: its title, else the first user message, else "(untitled)". Pure. */
+export function sessionTitle(s: { title?: string; firstUser?: string }): string {
+  const t = s.title?.trim();
+  if (t) return t;
+  const f = s.firstUser?.trim();
+  return f ? f : "(untitled)";
 }
 
 /** Base dir for harness state. Override with QWEN_HARNESS_DIR (used by tests). */
@@ -95,12 +105,13 @@ export class Session {
   }
 
   /** Start a brand-new session (writes the meta line). */
-  static create(opts: { model?: string; cwd?: string; id?: string } = {}): Session {
+  static create(opts: { model?: string; cwd?: string; id?: string; title?: string } = {}): Session {
     const meta: SessionMeta = {
       id: opts.id ?? randomUUID().slice(0, 8),
       createdAt: new Date().toISOString(),
       model: opts.model,
       cwd: opts.cwd,
+      title: opts.title,
     };
     const s = new Session(meta);
     fs.writeFileSync(s.file, JSON.stringify({ type: "meta", ...meta }) + "\n");
@@ -113,6 +124,7 @@ export class Session {
     if (!fs.existsSync(file)) throw new Error(`Session not found: ${id}`);
     const lines = fs.readFileSync(file, "utf8").split("\n").filter((l) => l.trim());
     let meta: SessionMeta | null = null;
+    let latestTitle: string | undefined; // a later `/rename` appends a title line; last one wins
     const messages: ChatMessage[] = [];
     for (const line of lines) {
       let e: Record<string, unknown>;
@@ -122,12 +134,16 @@ export class Session {
         continue; // skip a corrupt/partial trailing line
       }
       if (e.type === "meta") {
-        meta = { id: String(e.id), createdAt: String(e.createdAt), model: e.model as string | undefined, cwd: e.cwd as string | undefined };
+        meta = { id: String(e.id), createdAt: String(e.createdAt), model: e.model as string | undefined, cwd: e.cwd as string | undefined, title: e.title as string | undefined };
+      } else if (e.type === "title" && typeof e.title === "string") {
+        latestTitle = e.title;
       } else if (e.type === "message" && e.message) {
         messages.push(e.message as ChatMessage);
       }
     }
-    return { meta: meta ?? { id, createdAt: "unknown" }, messages };
+    const m = meta ?? { id, createdAt: "unknown" };
+    if (latestTitle !== undefined) m.title = latestTitle;
+    return { meta: m, messages };
   }
 
   /** Reopen an existing session for appending. */
@@ -146,6 +162,13 @@ export class Session {
  * List saved sessions, newest first. Pass `filterByCwd` to show ONLY the sessions that belong to that project
  * (same `projectKey`), so the list isn't a global mix across every folder. Backward-compatible: no arg = all.
  */
+/** Name (or rename) a session — appends a title line (append-only → crash-safe; latest wins on load). */
+export function setSessionTitle(id: string, title: string): void {
+  const file = sessionFile(id);
+  if (!fs.existsSync(file)) throw new Error(`Session not found: ${id}`);
+  fs.appendFileSync(file, JSON.stringify({ type: "title", ts: new Date().toISOString(), title }) + "\n");
+}
+
 export function listSessions(filterByCwd?: string): SessionSummary[] {
   const dir = sessionsDir();
   const files = fs.readdirSync(dir).filter((f) => f.endsWith(".jsonl"));
@@ -157,7 +180,7 @@ export function listSessions(filterByCwd?: string): SessionSummary[] {
       const { meta, messages } = Session.load(id);
       if (wantKey !== undefined && (!meta.cwd || projectKey(meta.cwd) !== wantKey)) continue; // other project → skip
       const firstUser = messages.find((m) => m.role === "user")?.content ?? "";
-      out.push({ id, createdAt: meta.createdAt, messages: messages.length, firstUser: firstUser.slice(0, 60) });
+      out.push({ id, createdAt: meta.createdAt, messages: messages.length, firstUser: firstUser.slice(0, 60), title: meta.title });
     } catch {
       if (wantKey === undefined) out.push({ id, createdAt: "?", messages: 0, firstUser: "" }); // unparseable: only when unfiltered
     }

@@ -31,6 +31,7 @@ export type AgentEvent =
   | { type: "compaction"; summarized: number; truncatedChars?: number; turn: number }
   | { type: "reflection"; reason: "tool_error" | "repeated_denial"; turn: number }
   | { type: "warning"; code: string; message: string; turn: number }
+  | { type: "context"; usedTokens: number; outTokens: number; numCtx: number; turn: number }
   | { type: "done"; reason: string; turns: number };
 
 export interface RunAgentOptions {
@@ -193,6 +194,10 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentResult> {
       tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
     });
     emit({ type: "assistant", text: assistantText, toolCalls, turn });
+    // C1: surface how full the context window is (uses the REAL prompt-token count from this generation).
+    if (opts.compaction?.numCtx) {
+      emit({ type: "context", usedTokens: result.usage.promptTokens, outTokens: result.usage.evalTokens, numCtx: opts.compaction.numCtx, turn });
+    }
 
     // No tool calls.
     if (toolCalls.length === 0) {

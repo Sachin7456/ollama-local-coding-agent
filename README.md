@@ -16,7 +16,7 @@
 <img src="https://readme-typing-svg.demolab.com?font=Fira+Code&size=22&pause=900&color=8957E5&center=true&vCenter=true&width=680&lines=Private.+Offline.+Zero+dependencies.;A+real+AI+coding+agent+%E2%80%94+not+a+chatbot.;Powered+by+Ollama+%2B+Qwen%2C+on+YOUR+machine.;No+cloud.+No+API+keys.+No+data+leaves." alt="tagline" />
 
 <p>
-  <img src="https://img.shields.io/badge/tests-339%20passing-2ea44f" alt="tests" />
+  <img src="https://img.shields.io/badge/tests-437%20passing-2ea44f" alt="tests" />
   <img src="https://img.shields.io/badge/dependencies-0-2ea44f" alt="zero dependencies" />
   <img src="https://img.shields.io/badge/build-none-2ea44f" alt="no build step" />
   <img src="https://img.shields.io/badge/runs-100%25%20offline-6e40c9" alt="offline" />
@@ -62,7 +62,7 @@ No cloud. No API keys. No telemetry. Your code never leaves your computer.
   inside Docker/WSL or set a sandbox wrapper.
 - 🪶 **Built for small local models.** Argument validation + repair, malformed
   tool-call recovery, and automatic context compaction make modest models reliable.
-- ✅ **Battle-tested.** 339 automated tests, plus a mandatory secret scan on every run.
+- ✅ **Battle-tested.** 437 automated tests, plus a mandatory secret scan on every run.
 
 ## ✨ What it can do
 
@@ -74,7 +74,11 @@ No cloud. No API keys. No telemetry. Your code never leaves your computer.
 🌊 **stream** answers live &nbsp;•&nbsp;
 🔁 switch models on the fly &nbsp;•&nbsp;
 🛑 **cancel** a running task with Ctrl+C &nbsp;•&nbsp;
-🪶 auto-compact long chats.
+🪶 auto-compact long chats &nbsp;•&nbsp;
+🎨 **colorized** markdown + diff output (NO_COLOR-safe) &nbsp;•&nbsp;
+⌨️ **command history** + Tab-autocomplete &nbsp;•&nbsp;
+📊 a **context-usage meter** &nbsp;•&nbsp;
+🎚️ pick models with `/model`.
 
 ## 🎯 Built for
 
@@ -153,13 +157,13 @@ problems, mid-chat:
 npm start -- "list the files here and tell me which is largest"
 ```
 
-**⌨️ REPL commands:** `/model <tag>` · `/mode <mode>` · `/models` · `/sessions` · `/new` · `/exit`
+**⌨️ REPL commands:** `/help` · `/model [tag]` · `/mode [mode]` · `/models` · `/context` · `/cost` · `/search <text>` · `/sessions` · `/new` · `/resume` · `/rename <title>` · `/compact` · `/editor` · `/theme` · `/clear` · `/perms` · `/exit`. On a terminal the **rich input is on by default**: a live `/` command menu (with argument submenus), `@` file mentions, fish-style **ghost-text** suggestions (→/End to accept), Ctrl+R search, **bracketed paste** (big pastes collapse to `[Pasted text #N]` and expand on send), **undo/redo** (Ctrl+Z/Ctrl+_), a **kill-ring** + word-wise editing, `!shell` escape, **arrow-key permission approvals** (↑/↓ + Enter), **Shift+Tab** to cycle the permission mode, a live **↑in ↓out** token counter (per turn + in the status line; also `/cost`), **searchable** `/resume` + `/model` pickers (name a chat with `/rename`), and a **`+N -N`** added/removed summary on edits. Prefer the classic line editor? `QWEN_HARNESS_PLAIN_INPUT=1` gives the plain readline REPL (Tab-complete + UP/DOWN history, y/a/N approvals). Piped/non-TTY input always uses the plain path.
 
 > Prefer a full, step-by-step walkthrough? → **[USER-GUIDE.md](./USER-GUIDE.md)**.
 
 ## ⭐ At a glance
 
-**339 tests · 0 dependencies · no build step · 100% offline · Apache-2.0 licensed.**
+**437 tests · 0 dependencies · no build step · 100% offline · Apache-2.0 licensed.**
 
 ## 🙏 Help wanted
 

@@ -20,12 +20,37 @@ import { preflight, formatPreflight, checkMemoryHeadroom } from "../cli/prefligh
 import { interruptAction, shellGuidance, parseAskReply, parseTrustReply, runLines, isCommandLine } from "../cli/repl.ts";
 import { Semaphore } from "../orchestration/gate.ts";
 import { runOrchestrator } from "../orchestration/orchestrator.ts";
-import { Session, listSessions, validateAndRecoverCwd } from "../state/session.ts";
+import { Session, listSessions, validateAndRecoverCwd, setSessionTitle, sessionTitle } from "../state/session.ts";
+import { runSelect } from "../ui/runSelect.ts";
 import { rememberTool, recallTool, buildMemoryBlock } from "../state/memory.ts";
 import { performStartupMigrations } from "../state/migration.ts";
 import { loadProjectRules, projectRulesIdentity } from "../state/projectRules.ts";
 import { readTrustDecision, storeTrustDecision } from "../permissions/workspaceTrust.ts";
 import type { ChatMessage } from "../model/ollamaClient.ts";
+import { estimateMessagesTokens, compactConversation } from "../state/compaction.ts";
+import { editInEditor } from "../ui/externalEditor.ts";
+import { themeFor, type Theme } from "../ui/theme.ts";
+import { type ColorPref } from "../ui/ansi.ts";
+import { CURSOR } from "../ui/ansi.ts";
+import { loadPrefs, savePrefs, type Prefs } from "../ui/prefs.ts";
+import { makeCompleter } from "../ui/completer.ts";
+import { loadHistorySeed, attachHistory, saveHistory } from "../ui/history.ts";
+import { resolveCommand, formatHelp, commandSummary, suggest } from "../ui/commands.ts";
+import { formatContextMeter } from "../ui/meter.ts";
+import { formatStatusLine, relativeTime } from "../ui/statusline.ts";
+import { formatPicker, parsePick, type PickerRow } from "../ui/picker.ts";
+import { emptyTally, addTurn, formatUsage } from "../ui/usage.ts";
+import { searchTranscript } from "../ui/transcriptSearch.ts";
+import { permissionPrompt } from "../ui/permissionPrompt.ts";
+import type { PermChoice } from "../ui/permissionDialog.ts";
+import { renderEvent } from "../ui/render.ts";
+import { listFiles } from "../ui/fileMentions.ts";
+import { runShell } from "../ui/shellMode.ts";
+import { readInput } from "../ui/inputController.ts";
+import { NodeKeySource } from "../ui/keys.ts";
+import { NodeScreen } from "../ui/screen.ts";
+import { runSpinner } from "../ui/spinner.ts";
+import { cycleMode } from "../ui/modes.ts";
 
 const SYSTEM_PROMPT = `You are a coding assistant working in a local project directory.
 You have tools: read_file, find_files, grep, write_file, edit_file, multi_edit, and a shell tool.
@@ -93,60 +118,8 @@ function parseArgs(argv: string[]): CliArgs {
   return { model, worker, task: rest.join(" ").trim() || undefined, mode, multi, resume, listSessions, maxTurns };
 }
 
-function printEvent(e: AgentEvent): void {
-  if (e.type === "assistant") {
-    if (e.toolCalls.length > 0) {
-      for (const c of e.toolCalls) {
-        console.log(`  → ${c.function.name}(${JSON.stringify(c.function.arguments)})`);
-      }
-    } else if (e.text.trim()) {
-      console.log(`\n${e.text.trim()}`);
-    }
-  } else if (e.type === "tool_result") {
-    const oneLine = e.content.replace(/\s+/g, " ").slice(0, 100);
-    console.log(`  ↳ [${e.decision}] ${e.tool}: ${oneLine}`);
-  } else if (e.type === "warning") {
-    console.log(`\n⚠️  ${e.message}`);
-  }
-}
-
-/** Scoped printer for multi-agent mode (prefixes worker lines). */
-function printScoped(scope: string, e: AgentEvent): void {
-  const tag = scope === "orchestrator" ? "" : `[${scope}] `;
-  if (e.type === "assistant") {
-    if (e.toolCalls.length > 0) {
-      for (const c of e.toolCalls) console.log(`${tag}  → ${c.function.name}(${JSON.stringify(c.function.arguments)})`);
-    } else if (e.text.trim()) {
-      console.log(`\n${tag}${e.text.trim()}`);
-    }
-  } else if (e.type === "tool_result") {
-    const oneLine = e.content.replace(/\s+/g, " ").slice(0, 100);
-    console.log(`${tag}  ↳ [${e.decision}] ${e.tool}: ${oneLine}`);
-  } else if (e.type === "compaction") {
-    const trimmed = e.truncatedChars ? `, trimmed ${e.truncatedChars} chars` : "";
-    console.log(`${tag}  · compacted context (summarized ${e.summarized} msgs${trimmed}) to fit the window`);
-  } else if (e.type === "warning") {
-    console.log(`\n${tag}⚠️  ${e.message}`);
-  }
-}
-
-/** Streaming printer: assistant text is already written live via onToken. */
-function printEventStreaming(e: AgentEvent): void {
-  if (e.type === "assistant") {
-    process.stdout.write("\n"); // close the streamed line
-    if (e.toolCalls.length > 0) {
-      for (const c of e.toolCalls) console.log(`  → ${c.function.name}(${JSON.stringify(c.function.arguments)})`);
-    }
-  } else if (e.type === "tool_result") {
-    const oneLine = e.content.replace(/\s+/g, " ").slice(0, 100);
-    console.log(`  ↳ [${e.decision}] ${e.tool}: ${oneLine}`);
-  } else if (e.type === "compaction") {
-    const trimmed = e.truncatedChars ? `, trimmed ${e.truncatedChars} chars` : "";
-    console.log(`  · compacted context (summarized ${e.summarized} msgs${trimmed}) to fit the window`);
-  } else if (e.type === "warning") {
-    console.log(`\n⚠️  ${e.message}`);
-  }
-}
+// Event rendering now lives in ui/render.ts (themed, width-aware, markdown/diff); main.ts builds onEvent closures
+// from it (see runTask) so the single-agent (streaming) and multi-agent (scoped) paths share one renderer.
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
@@ -158,9 +131,19 @@ async function main(): Promise<void> {
     return;
   }
 
+  // Preferences (color / verbosity / default model+mode) — global; fail-safe to built-in defaults.
+  const prefs = loadPrefs();
+  let theme: Theme = themeFor(prefs.color);
+  const cols = (): number => (stdout.columns && stdout.columns > 0 ? stdout.columns : 80);
+  const quiet = (): boolean => prefs.verbosity === "quiet" || !stdout.isTTY;
+  let lastContextPct = 0;
+  let sessionUsage = emptyTally(); // running token tally for /cost + the on-exit summary
+  const uiScreen = new NodeScreen();
+  const uiClock = { now: () => Date.now() };
+
   const model = (() => {
     try {
-      return resolveModel(args.model);
+      return resolveModel(args.model ?? prefs.defaultModel);
     } catch (e) {
       // A config error (e.g. an unknown model) — show the helpful message, not a raw stack trace.
       console.error(`\n⛔ ${(e as Error).message}\n`);
@@ -172,11 +155,12 @@ async function main(): Promise<void> {
     .register(recallTool);
   // Windows: add the PowerShell shell tool (the model is steered to it via the system prompt).
   if (process.platform === "win32") registry.register(powershellTool);
-  const permissions = createDefaultPermissions(args.mode);
+  const startMode = args.mode === "default" && prefs.defaultMode && isPermissionMode(prefs.defaultMode) ? prefs.defaultMode : args.mode;
+  const permissions = createDefaultPermissions(startMode);
   const ctx: ToolContext = { cwd: process.cwd(), readState: new ReadState() };
   // activeModel + workerModel are TAGS (registry keys), not names — routing/compaction/clientFor all key by tag,
   // and a compat tag (e.g. "gpt-oss-120b") can differ from its provider-prefixed wire name.
-  let activeModel = resolveModelTag(args.model);
+  let activeModel = resolveModelTag(args.model ?? prefs.defaultModel);
   // Worker model for multi-agent — REGISTRY-DRIVEN (works with any installed model, not hardcoded).
   const workerModel = resolveWorkerModelTag(args.worker);
 
@@ -244,7 +228,38 @@ async function main(): Promise<void> {
   // ctx.cwd to the session's project above, and after the migration above) — persisted, never global.
   for (const r of loadPermissionRules(ctx.cwd)) permissions.addAllowRule(r);
 
-  const rl = readline.createInterface({ input: stdin, output: stdout });
+  // Cached workspace file list for @-mentions / @-path Tab-completion (lazy; one scan per session).
+  let fileCache: string[] | null = null;
+  const files = (): string[] => (fileCache ??= listFiles(ctx.cwd));
+
+  // Rich raw-mode input is the DEFAULT on a TTY (live / palette · @-mentions · Ctrl+R · paste · undo · ghost-text).
+  // Opt OUT with QWEN_HARNESS_PLAIN_INPUT=1 for the plain readline REPL. Non-TTY / piped input always uses plain readline.
+  const richInput = Boolean(stdin.isTTY) && process.env.QWEN_HARNESS_PLAIN_INPUT !== "1";
+  const keySource = richInput ? new NodeKeySource() : null; // owns stdin in rich mode (main input + approval dialog)
+  const screenImpl = richInput ? uiScreen : null;
+  // In rich mode NodeKeySource owns stdin, so we do NOT keep a persistent readline Interface (they would conflict);
+  // the occasional line prompts (permission, pickers) go through ask() with a throwaway interface instead.
+  const rl = richInput
+    ? null
+    : readline.createInterface({
+        input: stdin,
+        output: stdout,
+        completer: makeCompleter(() => Object.keys(getModels()), files), // Tab: commands, model tags, @file paths
+        history: loadHistorySeed(), // restore cross-session history (newest-first)
+        removeHistoryDuplicates: true,
+      });
+  if (rl) attachHistory(rl); // persist history whenever it changes
+  // One-shot line prompt: reuse the persistent rl (plain mode), else a throwaway interface (rich mode — safe because
+  // NodeKeySource is stopped during these prompts).
+  const ask = async (q: string): Promise<string> => {
+    if (rl) return rl.question(q);
+    const tmp = readline.createInterface({ input: stdin, output: stdout });
+    try {
+      return await tmp.question(q);
+    } finally {
+      tmp.close();
+    }
+  };
 
   const onAsk = async (info: AskInfo): Promise<boolean> => {
     // Non-interactive (one-shot / piped stdin): we can't prompt — deny safely instead of crashing on
@@ -256,13 +271,20 @@ async function main(): Promise<void> {
       );
       return false;
     }
-    const reply = parseAskReply(
-      await rl.question(
-        `\n⚠️  Allow ${info.toolName}(${JSON.stringify(info.args)})?  [${info.reason}]  (y = once · a = always · N = no) `,
-      ),
-    );
-    if (reply === "no") return false;
-    if (reply === "always") {
+    let choice: PermChoice;
+    if (richInput && keySource && screenImpl) {
+      const preview = typeof info.args.command === "string" ? info.args.command : undefined;
+      choice = await permissionPrompt({ keys: keySource, screen: screenImpl, theme }, { toolName: info.toolName, reason: info.reason, preview });
+    } else {
+      const reply = parseAskReply(
+        await ask(
+          `\n⚠️  Allow ${info.toolName}(${JSON.stringify(info.args)})?  [${info.reason}]  (y = once · a = always · N = no) `,
+        ),
+      );
+      choice = reply === "no" ? "deny" : reply === "always" ? "always" : "allow";
+    }
+    if (choice === "deny") return false;
+    if (choice === "always") {
       // "Always allow" remembers a shell COMMAND (prefix) — grows the auto-allow set without code edits.
       const cmd = typeof info.args.command === "string" ? info.args.command.trim() : "";
       if (cmd && (info.toolName === "bash" || info.toolName === "powershell")) {
@@ -293,10 +315,10 @@ async function main(): Promise<void> {
     if (exiting) return; // one-shot: a single Ctrl+C exits once
     exiting = true;
     console.log("\n(bye)");
-    rl.close();
+    rl?.close();
     process.exit(0);
   };
-  rl.on("SIGINT", handleInterrupt);
+  rl?.on("SIGINT", handleInterrupt); // rich mode: rl is null (readInput handles Ctrl+C); process SIGINT still fires
   process.on("SIGINT", handleInterrupt);
 
   // Help004: workspace trust. The only untrusted in-repo content we load is the project-rules file
@@ -311,7 +333,7 @@ async function main(): Promise<void> {
         workspaceTrusted = decided;
       } else if (stdin.isTTY) {
         workspaceTrusted = parseTrustReply(
-          await rl.question(
+          await ask(
             `\n🔐 "${rules.name}" in this folder will be added to the model's instructions.\n   Trust this workspace and load it?  (y = yes · N = no) `,
           ),
         );
@@ -337,9 +359,40 @@ async function main(): Promise<void> {
     const projectRules = workspaceTrusted ? loadProjectRules(ctx.cwd) : ""; // Help004: only load in-repo rules from a TRUSTED workspace
     const base = [SYSTEM_PROMPT, memBlock, projectRules].filter(Boolean).join("\n\n");
     const sysPrompt = `${base}\n\n${shellGuidance(process.platform)}\n\n${CRITICAL_RULES}`; // critical rules LAST (recency for small models)
+    // Render the agent's event stream via ui/render.ts. Single-agent streams text live (raw); multi-agent is
+    // non-streaming so its text gets markdown. Both track context% for the status line; quiet mode hides the meter.
+    let stopSpin: (() => void) | null = null;
+    const clearSpin = (): void => {
+      if (stopSpin) {
+        stopSpin();
+        stopSpin = null;
+      }
+    };
+    const onEventSingle = (e: AgentEvent): void => {
+      clearSpin();
+      if (e.type === "context") {
+        if (e.numCtx > 0) lastContextPct = e.usedTokens / e.numCtx;
+        sessionUsage = addTurn(sessionUsage, e.usedTokens, e.outTokens);
+        if (quiet()) return;
+      }
+      const out = renderEvent(e, { theme, cols: cols(), streaming: true, markdown: false, threshold: compaction.threshold });
+      if (e.type === "assistant") process.stdout.write("\n"); // close the live-streamed line
+      if (out) console.log(out);
+    };
+    const onEventScoped = (scope: string, e: AgentEvent): void => {
+      clearSpin();
+      if (e.type === "context") {
+        if (e.numCtx > 0) lastContextPct = e.usedTokens / e.numCtx;
+        sessionUsage = addTurn(sessionUsage, e.usedTokens, e.outTokens);
+        if (quiet()) return;
+      }
+      const out = renderEvent(e, { theme, cols: cols(), scope, markdown: true, threshold: compaction.threshold });
+      if (out) console.log(out);
+    };
     const ac = new AbortController();
     activeAbort = ac;
     try {
+      if (stdout.isTTY && !quiet()) stopSpin = runSpinner(uiScreen, theme, "thinking", uiClock); // cleared on first output
       const res = args.multi
         ? await runOrchestrator({
             task: text,
@@ -351,7 +404,7 @@ async function main(): Promise<void> {
               orchestratorModel: activeModel,
               workerModel,
               onAsk,
-              onEvent: printScoped,
+              onEvent: onEventScoped,
               maxWorkerTurns: 10,
               projectRules, // A8: a trusted project's rules apply in multi-agent mode too
               signal: ac.signal,
@@ -371,8 +424,11 @@ async function main(): Promise<void> {
             userMessage: text,
             onAsk,
             stream: true,
-            onToken: (c) => process.stdout.write(c),
-            onEvent: printEventStreaming,
+            onToken: (c) => {
+              clearSpin();
+              process.stdout.write(c);
+            },
+            onEvent: onEventSingle,
             maxTurns: args.maxTurns ?? 25,
             priorMessages,
             onMessage,
@@ -382,6 +438,7 @@ async function main(): Promise<void> {
       history = res.messages; // carry the conversation forward (and it's persisted)
       if (res.stopReason !== "completed") console.log(`\n[stopped: ${res.stopReason}]`);
     } finally {
+      clearSpin();
       activeAbort = null;
     }
   }
@@ -390,7 +447,7 @@ async function main(): Promise<void> {
   if (args.task) {
     await runTask(args.task);
     console.log(`\n(session ${session.id} — resume: npm start -- --resume ${session.id})`);
-    rl.close();
+    rl?.close();
     return;
   }
 
@@ -398,61 +455,241 @@ async function main(): Promise<void> {
   // (piped/pasted) path so both dispatch slash-commands and tasks identically. Returns false to end the session.
   const processInput = async (input: string, isInteractive = true): Promise<boolean> => {
     if (!input) return true;
+    // `!cmd` — a USER shell escape (not the model): run it and inject the output into the conversation.
+    if (isInteractive && input.startsWith("!")) {
+      const cmd = input.slice(1).trim();
+      if (cmd) {
+        const out = runShell(cmd);
+        console.log(theme.dim(out));
+        const note = `[user ran \`${cmd}\`]\n${out}`;
+        history.push({ role: "user", content: note });
+        session.appendMessage({ role: "user", content: note });
+      }
+      return true;
+    }
     // A5: ONLY the interactive REPL dispatches slash-commands. Piped/pasted (non-interactive) input treats a
     // "/"-line as plain task text, so a pasted `/exit` (or any `/word`) can't silently end or hijack the run.
     if (isCommandLine(input, isInteractive)) {
-      if (input === "/exit" || input === "/quit") return false;
-      if (input === "/perms") {
-        const rules = loadPermissionRules(ctx.cwd);
-        if (rules.length === 0) console.log("no remembered 'always allow' rules yet (press 'a' at a permission prompt to add one).");
-        else for (const r of rules) console.log(`  ${r.tool}: ${r.commandPrefix}`);
+      const spec = resolveCommand(input); // registry = single source of truth (name + aliases)
+      const arg = input.trim().split(/\s+/).slice(1).join(" ");
+      if (!spec) {
+        const did = suggest(input);
+        console.log(`unknown command "${input.split(/\s+/)[0]}".${did ? ` did you mean ${did}?` : ""}  (/help)`);
         return true;
       }
-      if (input === "/models") {
-        console.log(`configured: ${Object.keys(getModels()).join(", ")}`);
-        try {
-          const installed = await clientFor(activeModel).listModels();
-          console.log(`installed in Ollama: ${installed.length ? installed.join(", ") : "(none)"}`);
-        } catch (e) {
-          console.log(`(couldn't query Ollama: ${(e as Error).message})`);
-        }
-        return true;
-      }
-      if (input === "/sessions") {
-        // A3: show only THIS project's sessions (not a global mix across every folder).
-        const rows = listSessions(ctx.cwd);
-        if (rows.length === 0) console.log("(no saved sessions for this project yet)");
-        else for (const s of rows) console.log(`${s.id}  ${s.createdAt}  (${s.messages} msgs)  ${s.firstUser}`);
-        return true;
-      }
-      if (input === "/new") {
-        session = Session.create({ model: activeModel, cwd: ctx.cwd });
-        history = [];
-        console.log(`started new session ${session.id}`);
-        return true;
-      }
-      if (input.startsWith("/model ")) {
-        const tag = input.slice("/model ".length).trim();
-        if (getModels()[tag]) {
-          activeModel = tag;
-          console.log(`switched model -> ${tag}`);
-        } else {
-          console.log(`unknown model "${tag}". Known: ${Object.keys(getModels()).join(", ")}`);
-        }
-        return true;
-      }
-      if (input.startsWith("/mode ")) {
-        const m = input.slice("/mode ".length).trim();
-        if (!isPermissionMode(m)) {
-          console.log(`unknown mode "${m}". Valid: ${PERMISSION_MODES.join(", ")}`);
+      switch (spec.name) {
+        case "exit":
+          return false;
+        case "help": {
+          console.log(formatHelp(theme));
           return true;
         }
-        permissions.setMode(m);
-        console.log(`mode -> ${permissions.mode}`);
-        return true;
+        case "perms": {
+          const rules = loadPermissionRules(ctx.cwd);
+          if (rules.length === 0) console.log("no remembered 'always allow' rules yet (press 'a' at a permission prompt to add one).");
+          else for (const r of rules) console.log(`  ${r.tool}: ${r.commandPrefix}`);
+          return true;
+        }
+        case "models": {
+          console.log(`configured: ${Object.keys(getModels()).join(", ")}`);
+          try {
+            const installed = await clientFor(activeModel).listModels();
+            console.log(`installed in Ollama: ${installed.length ? installed.join(", ") : "(none)"}`);
+          } catch (e) {
+            console.log(`(couldn't query Ollama: ${(e as Error).message})`);
+          }
+          return true;
+        }
+        case "sessions": {
+          const rows = listSessions(ctx.cwd); // A3: this project only
+          if (rows.length === 0) console.log("(no saved sessions for this project yet)");
+          else for (const s of rows) console.log(`${s.id}  ${s.createdAt}  (${s.messages} msgs)  ${sessionTitle(s)}`);
+          return true;
+        }
+        case "new": {
+          session = Session.create({ model: activeModel, cwd: ctx.cwd });
+          history = [];
+          console.log(`started new session ${session.id}`);
+          return true;
+        }
+        case "context": {
+          // On-demand fullness from the live transcript (estimate) vs the model's window.
+          const meter = formatContextMeter(estimateMessagesTokens(history), resolveModel(activeModel).numCtx, 0.75, theme);
+          console.log(meter.line);
+          return true;
+        }
+        case "cost": {
+          console.log(theme.dim("session usage (local estimate): ") + formatUsage(sessionUsage));
+          return true;
+        }
+        case "search": {
+          if (!arg) {
+            console.log("usage: /search <text>");
+            return true;
+          }
+          const hits = searchTranscript(history, arg);
+          if (hits.length === 0) console.log(theme.dim(`(no matches for "${arg}")`));
+          else {
+            console.log(theme.dim(`${hits.length} match(es) for "${arg}":`));
+            for (const h of hits) console.log(`  ${theme.accent("#" + h.index)} ${theme.dim(h.role)}  ${h.line}`);
+          }
+          return true;
+        }
+        case "model": {
+          if (!arg) {
+            // C2: no-arg → interactive picker of configured + on-machine models.
+            const tags = Object.keys(getModels());
+            let installed = new Set<string>();
+            try {
+              const localTag = tags.find(isOllamaTag);
+              if (localTag) installed = new Set(await clientFor(localTag).listModels());
+            } catch {
+              /* Ollama unreachable → just don't mark installed */
+            }
+            const rows: PickerRow[] = tags.map((t) => {
+              const ollama = isOllamaTag(t);
+              const badge = ollama ? (installed.has(resolveModel(t).name) ? "installed" : "not installed") : "remote";
+              return { label: t, active: t === activeModel, badge };
+            });
+            let chosenTag: string | null;
+            if (richInput && keySource && screenImpl) {
+              const items = rows.map((r) => ({ label: r.label, value: r.label, hint: (r.active ? "current · " : "") + (r.badge ?? "") }));
+              chosenTag = await runSelect({ keys: keySource, screen: screenImpl, theme }, items, "Pick a model:");
+            } else {
+              console.log(formatPicker(rows, theme));
+              const pick = parsePick(await ask("pick a model (number, blank = cancel): "), rows.length);
+              chosenTag = pick === null ? null : rows[pick].label;
+            }
+            if (chosenTag === null) console.log("(no change)");
+            else {
+              activeModel = chosenTag;
+              console.log(theme.ok(`switched model -> ${activeModel}`));
+            }
+            return true;
+          }
+          const parts = arg.split(/\s+/);
+          const tag = parts[0];
+          if (getModels()[tag]) {
+            activeModel = tag;
+            console.log(theme.ok(`switched model -> ${tag}`));
+            if (parts.includes("--persist")) {
+              prefs.defaultModel = tag;
+              savePrefs(prefs);
+              console.log(theme.dim("  (saved as your default model)"));
+            }
+          } else {
+            console.log(`unknown model "${tag}". Known: ${Object.keys(getModels()).join(", ")}`);
+          }
+          return true;
+        }
+        case "mode": {
+          if (!arg) {
+            permissions.setMode(cycleMode(permissions.mode)); // no arg → cycle default → acceptEdits → plan
+            console.log(theme.ok(`mode -> ${permissions.mode}`) + theme.dim("  (cycles; or /mode <name>)"));
+            return true;
+          }
+          if (!isPermissionMode(arg)) {
+            console.log(`unknown mode "${arg}". Valid: ${PERMISSION_MODES.join(", ")}`);
+            return true;
+          }
+          permissions.setMode(arg);
+          console.log(theme.ok(`mode -> ${permissions.mode}`));
+          return true;
+        }
+        case "theme": {
+          if (!arg) {
+            console.log(`color: ${prefs.color}.  Valid: auto, always, never`);
+            return true;
+          }
+          if (arg !== "auto" && arg !== "always" && arg !== "never") {
+            console.log(`unknown theme "${arg}". Valid: auto, always, never`);
+            return true;
+          }
+          prefs.color = arg as ColorPref;
+          theme = themeFor(prefs.color);
+          savePrefs(prefs);
+          console.log(theme.ok(`color -> ${prefs.color}`));
+          return true;
+        }
+        case "clear": {
+          if (stdout.isTTY) process.stdout.write(CURSOR.clearScreen);
+          return true;
+        }
+        case "resume": {
+          const rows = listSessions(ctx.cwd);
+          if (rows.length === 0) {
+            console.log("(no saved sessions for this project yet)");
+            return true;
+          }
+          let chosenId: string | null;
+          if (richInput && keySource && screenImpl) {
+            const items = rows.map((s) => ({ label: sessionTitle(s), value: s.id, hint: `${relativeTime(s.createdAt, Date.now())} · ${s.messages} msgs` }));
+            chosenId = await runSelect({ keys: keySource, screen: screenImpl, theme }, items, "Resume which session?");
+          } else {
+            console.log(
+              formatPicker(
+                rows.map((s) => ({ label: `${s.id}  ${sessionTitle(s)}`, badge: `${s.messages} msgs` })),
+                theme,
+              ),
+            );
+            const pick = parsePick(await ask("resume which? (number, blank = cancel): "), rows.length);
+            chosenId = pick === null ? null : rows[pick].id;
+          }
+          if (chosenId === null) {
+            console.log("(cancelled)");
+            return true;
+          }
+          try {
+            const opened = Session.open(chosenId);
+            session = opened.session;
+            history = opened.messages;
+            console.log(theme.ok(`resumed ${session.id} (${history.length} messages)`));
+          } catch (e) {
+            console.log(`(couldn't open: ${(e as Error).message})`);
+          }
+          return true;
+        }
+        case "rename": {
+          if (!arg) {
+            console.log(theme.dim(`current title: ${session.meta.title ?? "(untitled)"}  —  use /rename <title>`));
+            return true;
+          }
+          try {
+            setSessionTitle(session.id, arg);
+            session.meta.title = arg;
+            console.log(theme.ok(`renamed this session -> "${arg}"`));
+          } catch (e) {
+            console.log(`(couldn't rename: ${(e as Error).message})`);
+          }
+          return true;
+        }
+        case "compact": {
+          if (history.length === 0) {
+            console.log("(nothing to compact yet)");
+            return true;
+          }
+          const r = await compactConversation({ client: clientFor(activeModel), model: activeModel, gate }, history, { keepRecent: 8 });
+          if (r.summarized > 0) {
+            history = r.messages;
+            console.log(theme.ok(`compacted ${r.summarized} messages into a summary`));
+          } else {
+            console.log("(already compact)");
+          }
+          return true;
+        }
+        case "editor": {
+          const text = editInEditor().trim();
+          if (!text) {
+            console.log("(nothing to send)");
+            return true;
+          }
+          console.log(theme.dim("(running your composed message…)"));
+          await runTask(text);
+          return true;
+        }
+        default:
+          return true;
       }
-      console.log(`unknown command "${input.split(" ")[0]}". commands: /exit  /model <tag>  /mode <mode>  /models  /perms  /sessions  /new`);
-      return true;
     }
     try {
       await runTask(input);
@@ -466,28 +703,75 @@ async function main(): Promise<void> {
   // backpressure, so a long-running task can't drop the lines queued behind it (the old single-question loop
   // processed only the first piped line). No prompt/banner in this mode.
   if (!stdin.isTTY) {
-    await runLines(rl, (line) => processInput(line, false)); // A5: non-interactive → "/"-lines are plain text
-    rl.close();
+    await runLines(rl!, (line) => processInput(line, false)); // A5: non-interactive → "/"-lines are plain text
+    rl?.close();
     return;
   }
 
   // Interactive REPL.
   const modeLabel = args.multi ? `multi-agent (orch=${activeModel}, worker=${workerModel}, cap=2)` : `single (${activeModel})`;
-  console.log(`qwen-harness  —  ${modeLabel}  |  perms: ${permissions.mode}  |  cwd: ${ctx.cwd}`);
-  console.log(`session: ${session.id}   (resume later:  npm start -- --resume ${session.id})`);
-  console.log(`commands: /exit  /model <tag>  /mode <mode>  /models  /perms  /sessions  /new\n`);
+  console.log(theme.accent("qwen-harness") + theme.dim(`  —  ${modeLabel}  |  perms: ${permissions.mode}  |  cwd: ${ctx.cwd}`));
+  console.log(theme.dim(`session: ${session.id}   (resume later:  npm start -- --resume ${session.id})`));
+  console.log(theme.dim(`commands: ${commandSummary()}   (/help for details)`));
+  let richHistory = richInput ? loadHistorySeed() : [];
   for (;;) {
     let input: string;
     try {
-      input = (await rl.question("\n> ")).trim();
+      // Status line above the prompt: model · mode · cwd · context% · session (width-aware, themed).
+      const statusParts = {
+        model: activeModel,
+        mode: permissions.mode,
+        cwd: ctx.cwd,
+        contextPct: lastContextPct,
+        sessionId: session.id,
+        tokensIn: sessionUsage.input,
+        tokensOut: sessionUsage.output,
+      };
+      const status = formatStatusLine(statusParts, cols(), theme);
+      if (richInput && keySource && screenImpl) {
+        const outcome = await readInput(
+          { keys: keySource, screen: screenImpl, theme },
+          {
+            prompt: theme.accent("> "),
+            statusLine: status,
+            history: richHistory,
+            files,
+            onModeCycle: () => {
+              permissions.setMode(cycleMode(permissions.mode)); // Shift+Tab
+              return formatStatusLine({ ...statusParts, mode: permissions.mode }, cols(), theme);
+            },
+          },
+        );
+        if (outcome.kind === "eof") break;
+        if (outcome.kind === "cancel") continue;
+        input = outcome.text.trim();
+        if (input) {
+          richHistory = [input, ...richHistory.filter((h) => h !== input)].slice(0, 1000);
+          saveHistory(richHistory); // rich mode bypasses readline's own history event
+        }
+      } else {
+        console.log("\n" + status);
+        input = (await ask(theme.accent("> "))).trim();
+      }
     } catch {
       // readline closed (Ctrl+C / Ctrl+D / EOF) — exit cleanly instead of crashing.
       console.log("\n(input closed — exiting)");
       break;
     }
+    const beforeIn = sessionUsage.input;
+    const beforeOut = sessionUsage.output;
     if (!(await processInput(input))) break;
+    const dIn = sessionUsage.input - beforeIn;
+    const dOut = sessionUsage.output - beforeOut;
+    if (dIn > 0 || dOut > 0) console.log(theme.dim(`  ↑${dIn} ↓${dOut} tokens`)); // this turn
   }
-  rl.close();
+  if (sessionUsage.turns > 0) console.log(theme.dim("usage this session: " + formatUsage(sessionUsage)));
+  console.log(theme.dim("(bye)"));
+  keySource?.stop(); // restore cooked mode + drop the keypress listener
+  rl?.close();
+  // Rich mode leaves stdin raw + resumed (NodeKeySource never pauses it), so main() returning isn't enough to end the
+  // process — force a clean exit so /exit and Ctrl+D (EOF) actually quit. Plain mode exits fine via rl.close().
+  if (richInput) process.exit(0);
 }
 
 main().catch((e) => {
